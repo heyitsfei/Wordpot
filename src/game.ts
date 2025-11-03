@@ -90,11 +90,13 @@ export function isCorrect(feedback: Feedback): boolean {
 }
 
 /**
- * Check if a word is valid (5 letters, in word list)
+ * Check if a word is valid (5 letters, alphabetic only)
+ * Note: Any 5-letter word can be guessed, but target words come from WORD_LIST
  */
 export function isValidWord(word: string): boolean {
     const normalized = word.toLowerCase().trim()
-    return normalized.length === 5 && WORD_LIST.includes(normalized)
+    // Allow any 5-letter word with only alphabetic characters
+    return normalized.length === 5 && /^[a-z]{5}$/.test(normalized)
 }
 
 /**

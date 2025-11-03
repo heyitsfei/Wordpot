@@ -194,7 +194,8 @@ bot.onSlashCommand('wordle', async (handler, event) => {
             return
         }
 
-        const guess = event.args[1]?.toLowerCase().trim()
+        // Join all args after "guess" and remove spaces (in case word gets split)
+        const guess = event.args.slice(1).join(' ').replace(/\s+/g, '').toLowerCase().trim()
         if (!guess) {
             await handler.sendMessage(event.channelId, 'Usage: `/wordle guess <word>` (5 letters)')
             return
@@ -206,7 +207,7 @@ bot.onSlashCommand('wordle', async (handler, event) => {
         }
 
         if (!isValidWord(guess)) {
-            await handler.sendMessage(event.channelId, '❌ Invalid word. Must be a valid 5-letter word.')
+            await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).')
             return
         }
 
