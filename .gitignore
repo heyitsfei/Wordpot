@@ -31,3 +31,12 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+local.db
+
+# Drizzle
+drizzle/
