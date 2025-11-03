@@ -1,6 +1,6 @@
 import type { PlainMessage, SlashCommand } from '@towns-protocol/proto'
 
-const commands = [
+export const commands = [
     {
         name: 'help',
         description: 'Get help with bot commands',
