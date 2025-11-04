@@ -140,8 +140,12 @@ async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
     const pinnedMessage = await bot.sendMessage(
         channelId,
         `🎮 **Wordle Game #${game.gameNumber}**\n\n` +
-        `Guess the 5-letter word! Use \`/wordle guess <word>\` to play.\n\n` +
-        `Tip this message to add to the prize pool! 💰\n\n` +
+        `**NEW GAME STARTED!**\n\n` +
+        `**How to play:**\n` +
+        `1. 💰 **Tip this bot** to join (any amount)\n` +
+        `2. Use \`/guess <word>\` to submit guesses\n` +
+        `3. First correct guess wins the entire prize pool!\n\n` +
+        `**Rules:** Only players who have tipped can play and win.\n\n` +
         formatPool(game),
     )
 
@@ -169,165 +173,179 @@ bot.onTip(async (handler, event) => {
 
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
     db.addDeposit(game.id, event.senderAddress, token, event.amount)
+    
+    // Mark tipper as eligible to play
+    db.addEligiblePlayer(game.id, event.senderAddress)
 
     const formatted = formatUnits(event.amount, 18)
     const symbol = token === 'NATIVE' ? 'ETH' : token.slice(0, 6) + '...'
 
     await handler.sendMessage(
         event.channelId,
-        `💰 Tip received! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n${formatPool(game)}`,
+        `💰 Tip received from <@${event.senderAddress}>! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n` +
+        `✅ You're now eligible to play and win this round!\n\n${formatPool(game)}`,
     )
 })
 
-// Slash command: /wordle (handles all subcommands)
+// Slash command: /wordle (show status/help only)
 bot.onSlashCommand('wordle', async (handler, event) => {
-    const subcommand = event.args[0]?.toLowerCase()
     const game = getOrCreateGame(event.spaceId, event.channelId)
 
-    // Handle subcommands
-    if (subcommand === 'guess') {
-        if (game.state === 'PAYOUT_PENDING') {
-            await handler.sendMessage(
-                event.channelId,
-                `⏳ Game #${game.gameNumber} is being paid out. A new game will start soon!`,
-            )
-            return
-        }
-
-        // Join all args after "guess" and remove spaces (in case word gets split)
-        const guess = event.args.slice(1).join(' ').replace(/\s+/g, '').toLowerCase().trim()
-        if (!guess) {
-            await handler.sendMessage(event.channelId, 'Usage: `/wordle guess <word>` (5 letters)')
-            return
-        }
-
-        if (guess.length !== 5) {
-            await handler.sendMessage(event.channelId, '❌ Guess must be exactly 5 letters!')
-            return
-        }
-
-        if (!isValidWord(guess)) {
-            await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).')
-            return
-        }
-
-        const feedback = computeFeedback(guess, game.targetWord)
-        const guessRecord = db.addGuess(game.id, event.userId, guess, feedback.emoji)
-
-        const userGuesses = db.getUserGuesses(game.id, event.userId)
-        const guessNumber = userGuesses.length
-
-        if (isCorrect(feedback)) {
-            // Try to lock the game for this winner
-            const locked = await db.casToPayoutPending(game.id, event.userId)
-            if (!locked) {
-                await handler.sendMessage(
-                    event.channelId,
-                    `❌ Too late! Someone else already won Game #${game.gameNumber}.`,
-                )
-                return
-            }
-
-            // Winner! Execute payout
-            try {
-                const txHash = await executePayout(game, event.userId)
-                await announceWinner(game, event.userId, await buildPayoutPlan(game), txHash)
-
-                // Start new game
-                await startNewGame(event.spaceId, event.channelId)
-            } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : 'Unknown error'
-                await handler.sendMessage(
-                    event.channelId,
-                    `⚠️ Payout failed: ${errorMsg}. Game #${game.gameNumber} is locked. Please contact admin.`,
-                )
-            }
-        } else {
-            // Show feedback
-            const feedbackText = formatFeedback(guess, feedback)
-            await handler.sendMessage(
-                event.channelId,
-                `**Guess #${guessNumber}:**\n${feedbackText}`,
-            )
-        }
-        return
-    }
-
-    if (subcommand === 'pool') {
-        await handler.sendMessage(event.channelId, formatPool(game))
-        return
-    }
-
-    if (subcommand === 'leaderboard') {
-        const entries = db.getLeaderboard(event.spaceId, 10)
-
-        if (entries.length === 0) {
-            await handler.sendMessage(event.channelId, '📊 No winners yet. Be the first!')
-            return
-        }
-
-        const lines = entries.map((entry, i) => {
-            const winnings = formatUnits(entry.totalWinnings, 18)
-            return `${i + 1}. <@${entry.userId}> - ${entry.wins} win${entry.wins !== 1 ? 's' : ''} (${winnings} ETH won)`
-        })
-
-        await handler.sendMessage(
-            event.channelId,
-            `🏆 **Leaderboard**\n\n${lines.join('\n')}`,
-        )
-        return
-    }
-
-    if (subcommand === 'config') {
-        const isAdmin = await handler.hasAdminPermission(event.userId, event.spaceId)
-        if (!isAdmin) {
-            await handler.sendMessage(event.channelId, '❌ Admin permission required.')
-            return
-        }
-
-        const action = event.args[1]?.toLowerCase()
-
-        if (action === 'reset') {
-            // Force start a new game
-            const currentGame = db.getCurrentGame(event.spaceId, event.channelId)
-            if (currentGame) {
-                db.setGameState(currentGame.id, 'PAYOUT_PENDING')
-            }
-
-            const newGame = await startNewGame(event.spaceId, event.channelId)
-            await handler.sendMessage(
-                event.channelId,
-                `✅ Game reset. New Game #${newGame.gameNumber} started.`,
-            )
-        } else {
-            await handler.sendMessage(
-                event.channelId,
-                '**Admin Commands:**\n• `/wordle config reset` - Force start a new game',
-            )
-        }
-        return
-    }
-
     // Default: show game status and help
+    const eligibleCount = db.getEligiblePlayers(game.id).length
     const message =
         `🎮 **Wordle Game #${game.gameNumber}**\n\n` +
         `**How to play:**\n` +
-        `• Use \`/wordle guess <word>\` to submit a guess\n` +
-        `• You have unlimited guesses\n` +
-        `• First correct guess wins the entire prize pool!\n\n` +
+        `1. 💰 **Tip the bot** to join this round (any amount)\n` +
+        `2. Use \`/guess <word>\` to submit a guess\n` +
+        `3. You have unlimited guesses\n` +
+        `4. First correct guess wins the entire prize pool!\n\n` +
+        `**Rules:**\n` +
+        `• Only players who have tipped can play and win\n` +
+        `• ${eligibleCount} player${eligibleCount !== 1 ? 's' : ''} eligible in this round\n\n` +
         `**Feedback:**\n` +
         `🟩 Green = correct letter, correct position\n` +
         `🟨 Yellow = correct letter, wrong position\n` +
         `⬜ Gray = letter not in word\n\n` +
         `**Commands:**\n` +
         `• \`/wordle\` - Show this help\n` +
-        `• \`/wordle guess <word>\` - Submit a guess\n` +
-        `• \`/wordle pool\` - Show prize pool\n` +
-        `• \`/wordle leaderboard\` - Show leaderboard\n` +
-        `• \`/wordle config reset\` - (Admin) Reset game\n\n` +
+        `• \`/guess <word>\` - Submit a guess\n` +
+        `• \`/pool\` - Show prize pool\n` +
+        `• \`/leaderboard\` - Show leaderboard\n` +
+        `• \`/config reset\` - (Admin) Reset game\n\n` +
         formatPool(game)
 
     await handler.sendMessage(event.channelId, message)
+})
+
+// Slash command: /guess
+bot.onSlashCommand('guess', async (handler, event) => {
+    const game = getOrCreateGame(event.spaceId, event.channelId)
+
+    if (game.state === 'PAYOUT_PENDING') {
+        await handler.sendMessage(
+            event.channelId,
+            `⏳ Game #${game.gameNumber} is being paid out. A new game will start soon!`,
+        )
+        return
+    }
+
+    // Check if user has tipped to be eligible
+    if (!db.isEligiblePlayer(game.id, event.userId)) {
+        await handler.sendMessage(
+            event.channelId,
+            `❌ You must tip the bot to play this round and be eligible to win!\n\n` +
+            `Tip any amount to join Game #${game.gameNumber}. Only players who have tipped can guess and win the prize pool.`,
+        )
+        return
+    }
+
+    // Word is the first arg now
+    const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
+    if (!guess) {
+        await handler.sendMessage(event.channelId, 'Usage: `/guess <word>` (5 letters)')
+        return
+    }
+
+    if (guess.length !== 5) {
+        await handler.sendMessage(event.channelId, '❌ Guess must be exactly 5 letters!')
+        return
+    }
+
+    if (!isValidWord(guess)) {
+        await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).')
+        return
+    }
+
+    const feedback = computeFeedback(guess, game.targetWord)
+    db.addGuess(game.id, event.userId, guess, feedback.emoji)
+
+    const userGuesses = db.getUserGuesses(game.id, event.userId)
+    const guessNumber = userGuesses.length
+
+    if (isCorrect(feedback)) {
+        const locked = await db.casToPayoutPending(game.id, event.userId)
+        if (!locked) {
+            await handler.sendMessage(
+                event.channelId,
+                `❌ Too late! Someone else already won Game #${game.gameNumber}.`,
+            )
+            return
+        }
+
+        try {
+            const txHash = await executePayout(game, event.userId)
+            await announceWinner(game, event.userId, await buildPayoutPlan(game), txHash)
+            await startNewGame(event.spaceId, event.channelId)
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+            await handler.sendMessage(
+                event.channelId,
+                `⚠️ Payout failed: ${errorMsg}. Game #${game.gameNumber} is locked. Please contact admin.`,
+            )
+        }
+    } else {
+        const feedbackText = formatFeedback(guess, feedback)
+        await handler.sendMessage(
+            event.channelId,
+            `**Guess #${guessNumber}:**\n${feedbackText}`,
+        )
+    }
+})
+
+// Slash command: /pool
+bot.onSlashCommand('pool', async (handler, event) => {
+    const game = getOrCreateGame(event.spaceId, event.channelId)
+    await handler.sendMessage(event.channelId, formatPool(game))
+})
+
+// Slash command: /leaderboard
+bot.onSlashCommand('leaderboard', async (handler, event) => {
+    const entries = db.getLeaderboard(event.spaceId, 10)
+
+    if (entries.length === 0) {
+        await handler.sendMessage(event.channelId, '📊 No winners yet. Be the first!')
+        return
+    }
+
+    const lines = entries.map((entry, i) => {
+        const winnings = formatUnits(entry.totalWinnings, 18)
+        return `${i + 1}. <@${entry.userId}> - ${entry.wins} win${entry.wins !== 1 ? 's' : ''} (${winnings} ETH won)`
+    })
+
+    await handler.sendMessage(
+        event.channelId,
+        `🏆 **Leaderboard**\n\n${lines.join('\n')}`,
+    )
+})
+
+// Slash command: /config (admin only)
+bot.onSlashCommand('config', async (handler, event) => {
+    const isAdmin = await handler.hasAdminPermission(event.userId, event.spaceId)
+    if (!isAdmin) {
+        await handler.sendMessage(event.channelId, '❌ Admin permission required.')
+        return
+    }
+
+    const action = event.args[0]?.toLowerCase()
+
+    if (action === 'reset') {
+        const currentGame = db.getCurrentGame(event.spaceId, event.channelId)
+        if (currentGame) {
+            db.setGameState(currentGame.id, 'PAYOUT_PENDING')
+        }
+
+        const newGame = await startNewGame(event.spaceId, event.channelId)
+        await handler.sendMessage(
+            event.channelId,
+            `✅ Game reset. New Game #${newGame.gameNumber} started.`,
+        )
+    } else {
+        await handler.sendMessage(
+            event.channelId,
+            '**Admin Commands:**\n• `/config reset` - Force start a new game',
+        )
+    }
 })
 
 const { jwtMiddleware, handler } = bot.start()

@@ -64,6 +64,7 @@ class Database {
     private deposits = new Map<string, Deposit>()
     private payouts = new Map<string, Payout>()
     private gameNumberCounter = new Map<string, number>() // key: `${spaceId}:${channelId}`
+    private eligiblePlayers = new Map<string, Set<string>>() // key: gameId, value: Set of userIds who tipped
 
     // Games
     createGame(spaceId: string, channelId: string, targetWord: string): Game {
@@ -216,6 +217,26 @@ class Database {
     }
 
     // Leaderboard
+    // Eligible players (must tip to play)
+    addEligiblePlayer(gameId: string, userId: string): void {
+        let players = this.eligiblePlayers.get(gameId)
+        if (!players) {
+            players = new Set()
+            this.eligiblePlayers.set(gameId, players)
+        }
+        players.add(userId)
+    }
+
+    isEligiblePlayer(gameId: string, userId: string): boolean {
+        const players = this.eligiblePlayers.get(gameId)
+        return players ? players.has(userId) : false
+    }
+
+    getEligiblePlayers(gameId: string): string[] {
+        const players = this.eligiblePlayers.get(gameId)
+        return players ? Array.from(players) : []
+    }
+
     getLeaderboard(spaceId: string, limit = 10): LeaderboardEntry[] {
         const entries = new Map<string, LeaderboardEntry>()
 
