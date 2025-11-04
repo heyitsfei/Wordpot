@@ -50,80 +50,121 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
 }
 
 // Format pool display
-function formatPool(game: Game): string {
+async function formatPool(game: Game): Promise<string> {
     const tokens = db.getPoolTokens(game.id)
+    
+    // Always check actual wallet balance for NATIVE token
+    let nativeBalance = 0n
+    try {
+        nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+    } catch (error) {
+        console.error('[formatPool] Error getting wallet balance:', error)
+    }
+
+    // If no tracked tokens but wallet has balance, show wallet balance
     if (tokens.length === 0) {
+        if (nativeBalance > 0n) {
+            const formatted = formatUnits(nativeBalance, 18)
+            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} ETH (from wallet)`
+        }
         return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
     }
 
-    const lines = tokens.map(token => {
-        const balance = db.getPoolBalance(game.id, token)
-        const decimals = token === 'NATIVE' ? 18 : 18 // Assume 18 decimals for simplicity
-        const formatted = formatUnits(balance, decimals)
+    const lines: string[] = []
+    
+    for (const token of tokens) {
+        const tracked = db.getPoolBalance(game.id, token)
+        
+        let actual: bigint
+        let displayAmount: bigint
+        
+        if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
+            // Use actual wallet balance for NATIVE
+            actual = nativeBalance
+            displayAmount = actual // Always show actual balance for NATIVE
+        } else {
+            // For ERC20 tokens, try to get actual balance
+            try {
+                if (token.startsWith('0x') && token.length === 42) {
+                    actual = await readContract(bot.viem, {
+                        address: token as Address,
+                        abi: erc20Abi,
+                        functionName: 'balanceOf',
+                        args: [bot.appAddress],
+                    }) as bigint
+                    displayAmount = actual // Use actual balance for ERC20 too
+                } else {
+                    displayAmount = tracked // Fallback to tracked if invalid address
+                }
+            } catch (error) {
+                console.error(`[formatPool] Error getting ERC20 balance for ${token}:`, error)
+                displayAmount = tracked // Fallback to tracked on error
+            }
+        }
+
+        const formatted = formatUnits(displayAmount, 18)
         const symbol = token === 'NATIVE' ? 'ETH' : token.slice(0, 6) + '...'
-        return `• ${formatted} ${symbol}`
-    })
+        
+        // Show tracked vs actual if they differ
+        if (tracked !== displayAmount && tracked > 0n) {
+            const trackedFormatted = formatUnits(tracked, 18)
+            lines.push(`• ${formatted} ${symbol} (tracked: ${trackedFormatted})`)
+        } else {
+            lines.push(`• ${formatted} ${symbol}`)
+        }
+    }
 
     return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}`
 }
 
-// Build payout plan
+// Build payout plan - always use on-chain wallet balance (source of truth)
 async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amount: bigint }>> {
-    const tokens = db.getPoolTokens(game.id)
     const plan: Array<{ token: string; amount: bigint }> = []
 
-    console.log(`[buildPayoutPlan] Game ${game.id}, tokens in pool:`, tokens)
+    console.log(`[buildPayoutPlan] Game ${game.id}, checking on-chain wallet balance`)
 
-    // If no tracked tokens, check wallet balance directly (fallback)
-    if (tokens.length === 0) {
-        try {
-            const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-            console.log(`[buildPayoutPlan] No tracked tokens, checking wallet balance: ${formatUnits(nativeBalance, 18)} ETH`)
-            if (nativeBalance > 0n) {
-                plan.push({ token: 'NATIVE', amount: nativeBalance })
-                return plan
-            }
-        } catch (error) {
-            console.error('[buildPayoutPlan] Error checking wallet balance:', error)
+    // Always check NATIVE (ETH) balance from wallet
+    try {
+        const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        console.log(`[buildPayoutPlan] NATIVE balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        
+        if (nativeBalance > 0n) {
+            plan.push({ token: 'NATIVE', amount: nativeBalance })
         }
+    } catch (error) {
+        console.error('[buildPayoutPlan] Error getting NATIVE balance:', error)
     }
 
-    for (const token of tokens) {
-        const tracked = db.getPoolBalance(game.id, token)
-        console.log(`[buildPayoutPlan] Token ${token}, tracked: ${formatUnits(tracked, 18)}`)
-
-        let actual: bigint
-        try {
-            if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
-                actual = await getBalance(bot.viem, { address: bot.appAddress })
-                console.log(`[buildPayoutPlan] NATIVE actual balance: ${formatUnits(actual, 18)} ETH`)
-            } else {
-                // Validate it's a valid address before calling contract
-                if (!token.startsWith('0x') || token.length !== 42) {
-                    console.warn(`Invalid token address: ${token}, skipping`)
-                    continue
-                }
-                actual = await readContract(bot.viem, {
-                    address: token as Address,
-                    abi: erc20Abi,
-                    functionName: 'balanceOf',
-                    args: [bot.appAddress],
-                }) as bigint
-                console.log(`[buildPayoutPlan] ERC20 ${token} actual balance: ${formatUnits(actual, 18)}`)
-            }
-        } catch (error) {
-            console.error(`[buildPayoutPlan] Error getting balance for token ${token}:`, error)
-            // Skip this token if we can't get its balance
+    // Check for ERC20 tokens that were tipped (from tracked deposits)
+    const trackedTokens = db.getPoolTokens(game.id)
+    for (const token of trackedTokens) {
+        // Skip NATIVE, already handled above
+        if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
             continue
         }
 
-        // Use the minimum of tracked vs actual, but prefer actual if tracked is 0
-        const amount = tracked > 0n ? (actual < tracked ? actual : tracked) : actual
-        console.log(`[buildPayoutPlan] Final amount for ${token}: ${formatUnits(amount, 18)}`)
-        
-        if (amount > 0n) {
-            const normalizedToken = token === 'NATIVE' || token === zeroAddress || !token || token.length === 0 ? 'NATIVE' : token
-            plan.push({ token: normalizedToken, amount })
+        // Validate token address
+        if (!token.startsWith('0x') || token.length !== 42) {
+            console.warn(`[buildPayoutPlan] Invalid token address: ${token}, skipping`)
+            continue
+        }
+
+        try {
+            const balance = await readContract(bot.viem, {
+                address: token as Address,
+                abi: erc20Abi,
+                functionName: 'balanceOf',
+                args: [bot.appAddress],
+            }) as bigint
+            
+            console.log(`[buildPayoutPlan] ERC20 ${token} balance: ${formatUnits(balance, 18)}`)
+            
+            if (balance > 0n) {
+                plan.push({ token: token as Address, amount: balance })
+            }
+        } catch (error) {
+            console.error(`[buildPayoutPlan] Error getting ERC20 balance for ${token}:`, error)
+            // Continue with other tokens if one fails
         }
     }
 
@@ -228,7 +269,7 @@ async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
         `2. Use \`/guess <word>\` to submit guesses\n` +
         `3. First correct guess wins the entire prize pool!\n\n` +
         `**Rules:** Only players who have tipped can play and win. Unwon prize rolls to next round.\n\n` +
-        formatPool(game),
+        await formatPool(game),
     )
 
     // Note: Bot framework doesn't have pinMessage yet, but message is sent
@@ -268,13 +309,13 @@ async function rolloverToNewGame(spaceId: string, channelId: string): Promise<{ 
         await bot.sendMessage(
             channelId,
             `↪️ Prize pool rolled over to Game #${newGame.gameNumber}:\n${lines}\n\n` +
-            formatPool(newGame),
+            await formatPool(newGame),
         )
     } else {
         await bot.sendMessage(
             channelId,
             `↪️ No funds to roll over. Game #${newGame.gameNumber} has started.\n\n` +
-            formatPool(newGame),
+            await formatPool(newGame),
         )
     }
 
@@ -315,7 +356,7 @@ bot.onTip(async (handler, event) => {
     await handler.sendMessage(
         event.channelId,
         `💰 Tip received from <@${event.userId}>! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n` +
-        `✅ You're now eligible to play and win this round!\n\n${formatPool(game)}`,
+        `✅ You're now eligible to play and win this round!\n\n${await formatPool(game)}`,
     )
 })
 
@@ -345,7 +386,7 @@ bot.onSlashCommand('wordle', async (handler, event) => {
         `• \`/pool\` - Show prize pool\n` +
         `• \`/leaderboard\` - Show leaderboard\n` +
         `• \`/config reset\` - (Admin) Reset game\n\n` +
-        formatPool(game)
+        await formatPool(game)
 
     await handler.sendMessage(event.channelId, message)
 })
@@ -467,7 +508,7 @@ bot.onMessage(async (handler, event) => {
 // Slash command: /pool
 bot.onSlashCommand('pool', async (handler, event) => {
     const game = await getOrCreateGame(event.spaceId, event.channelId)
-    await handler.sendMessage(event.channelId, formatPool(game))
+    await handler.sendMessage(event.channelId, await formatPool(game))
 })
 
 // Slash command: /leaderboard
