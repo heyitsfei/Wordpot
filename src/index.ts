@@ -267,11 +267,13 @@ bot.onSlashCommand('wordle', async (handler, event) => {
 // Slash command: /guess
 bot.onSlashCommand('guess', async (handler, event) => {
     const game = getOrCreateGame(event.spaceId, event.channelId)
+    const threadOpts = { threadId: event.eventId }
 
     if (game.state === 'PAYOUT_PENDING') {
         await handler.sendMessage(
             event.channelId,
             `⏳ Game #${game.gameNumber} is being paid out. A new game will start soon!`,
+            threadOpts,
         )
         return
     }
@@ -282,6 +284,7 @@ bot.onSlashCommand('guess', async (handler, event) => {
             event.channelId,
             `❌ You must tip the bot to play this round and be eligible to win!\n\n` +
             `Tip any amount to join Game #${game.gameNumber}. Only players who have tipped can guess and win the prize pool.`,
+            threadOpts,
         )
         return
     }
@@ -289,17 +292,17 @@ bot.onSlashCommand('guess', async (handler, event) => {
     // Word is the first arg now
     const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
     if (!guess) {
-        await handler.sendMessage(event.channelId, 'Usage: `/guess <word>` (5 letters)')
+        await handler.sendMessage(event.channelId, 'Usage: `/guess <word>` (5 letters)', threadOpts)
         return
     }
 
     if (guess.length !== 5) {
-        await handler.sendMessage(event.channelId, '❌ Guess must be exactly 5 letters!')
+        await handler.sendMessage(event.channelId, '❌ Guess must be exactly 5 letters!', threadOpts)
         return
     }
 
     if (!isValidWord(guess)) {
-        await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).')
+        await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).', threadOpts)
         return
     }
 
@@ -315,6 +318,7 @@ bot.onSlashCommand('guess', async (handler, event) => {
             await handler.sendMessage(
                 event.channelId,
                 `❌ Too late! Someone else already won Game #${game.gameNumber}.`,
+                threadOpts,
             )
             return
         }
@@ -328,6 +332,7 @@ bot.onSlashCommand('guess', async (handler, event) => {
             await handler.sendMessage(
                 event.channelId,
                 `⚠️ Payout failed: ${errorMsg}. Game #${game.gameNumber} is locked. Please contact admin.`,
+                threadOpts,
             )
         }
     } else {
@@ -335,6 +340,7 @@ bot.onSlashCommand('guess', async (handler, event) => {
         await handler.sendMessage(
             event.channelId,
             `**Guess #${guessNumber}:**\n${feedbackText}`,
+            threadOpts,
         )
     }
 })
