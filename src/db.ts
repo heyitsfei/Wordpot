@@ -219,17 +219,19 @@ class Database {
     // Leaderboard
     // Eligible players (must tip to play)
     addEligiblePlayer(gameId: string, userId: string): void {
+        const normalized = userId.toLowerCase()
         let players = this.eligiblePlayers.get(gameId)
         if (!players) {
             players = new Set()
             this.eligiblePlayers.set(gameId, players)
         }
-        players.add(userId)
+        players.add(normalized)
     }
 
     isEligiblePlayer(gameId: string, userId: string): boolean {
+        const normalized = userId.toLowerCase()
         const players = this.eligiblePlayers.get(gameId)
-        return players ? players.has(userId) : false
+        return players ? players.has(normalized) : false
     }
 
     getEligiblePlayers(gameId: string): string[] {
