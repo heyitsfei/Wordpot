@@ -145,12 +145,58 @@ async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
         `1. 💰 **Tip this bot** to join (any amount)\n` +
         `2. Use \`/guess <word>\` to submit guesses\n` +
         `3. First correct guess wins the entire prize pool!\n\n` +
-        `**Rules:** Only players who have tipped can play and win.\n\n` +
+        `**Rules:** Only players who have tipped can play and win. Unwon prize rolls to next round.\n\n` +
         formatPool(game),
     )
 
     // Note: Bot framework doesn't have pinMessage yet, but message is sent
     return game
+}
+
+// Rollover current game's prize pool to a new game and start immediately
+async function rolloverToNewGame(spaceId: string, channelId: string): Promise<{ newGame: Game; rolled: Array<{ token: string; amount: bigint }> }> {
+    const current = db.getCurrentGame(spaceId, channelId)
+    // Start fresh game first
+    const newGame = await startNewGame(spaceId, channelId)
+
+    const rolled: Array<{ token: string; amount: bigint }> = []
+
+    if (current) {
+        // Mark current game as ended (reuse PAYOUT_PENDING to prevent further play)
+        db.setGameState(current.id, 'PAYOUT_PENDING')
+
+        // Move tracked balances to new game (no onchain movement needed)
+        const tokens = db.getPoolTokens(current.id)
+        for (const token of tokens) {
+            const amount = db.getPoolBalance(current.id, token)
+            if (amount > 0n) {
+                db.addToPool(newGame.id, token, amount)
+                rolled.push({ token, amount })
+            }
+        }
+    }
+
+    // Announce rollover details
+    if (rolled.length > 0) {
+        const lines = rolled.map(r => {
+            const symbol = r.token === 'NATIVE' ? 'ETH' : r.token.slice(0, 6) + '...'
+            return `• ${formatUnits(r.amount, 18)} ${symbol}`
+        }).join('\n')
+
+        await bot.sendMessage(
+            channelId,
+            `↪️ Prize pool rolled over to Game #${newGame.gameNumber}:\n${lines}\n\n` +
+            formatPool(newGame),
+        )
+    } else {
+        await bot.sendMessage(
+            channelId,
+            `↪️ No funds to roll over. Game #${newGame.gameNumber} has started.\n\n` +
+            formatPool(newGame),
+        )
+    }
+
+    return { newGame, rolled }
 }
 
 // Handle tips
@@ -329,21 +375,19 @@ bot.onSlashCommand('config', async (handler, event) => {
 
     const action = event.args[0]?.toLowerCase()
 
-    if (action === 'reset') {
-        const currentGame = db.getCurrentGame(event.spaceId, event.channelId)
-        if (currentGame) {
-            db.setGameState(currentGame.id, 'PAYOUT_PENDING')
-        }
-
-        const newGame = await startNewGame(event.spaceId, event.channelId)
+    if (action === 'reset' || action === 'rollover') {
+        // End current round (no winner) and roll tracked prize pool to the next round
+        const { newGame } = await rolloverToNewGame(event.spaceId, event.channelId)
         await handler.sendMessage(
             event.channelId,
-            `✅ Game reset. New Game #${newGame.gameNumber} started.`,
+            `✅ Round ended with no winner. Prize pool rolled into Game #${newGame.gameNumber}.`,
         )
     } else {
         await handler.sendMessage(
             event.channelId,
-            '**Admin Commands:**\n• `/config reset` - Force start a new game',
+            '**Admin Commands:**\n' +
+            '• `/config reset` - End current round (no winner) and roll prize into a new round\n' +
+            '• `/config rollover` - Alias for reset',
         )
     }
 })
