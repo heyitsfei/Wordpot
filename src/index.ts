@@ -13,12 +13,38 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
     baseRpcUrl: process.env.BASE_RPC_URL || 'https://mainnet.base.org',
 })
 
+// Sync on-chain wallet balance to pool (for recovery after restart)
+async function syncWalletBalanceToPool(gameId: string): Promise<void> {
+    try {
+        // Check if pool already has entries (don't double-count if already synced)
+        const existingTokens = db.getPoolTokens(gameId)
+        if (existingTokens.length > 0) {
+            return // Already has pool entries, skip sync
+        }
+
+        // Check NATIVE (ETH) balance
+        const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        if (nativeBalance > 0n) {
+            // Only add if it's a meaningful amount (more than dust)
+            if (nativeBalance > parseUnits('0.0001', 18)) {
+                db.addToPool(gameId, 'NATIVE', nativeBalance)
+                console.log(`Synced ${formatUnits(nativeBalance, 18)} ETH to pool for game ${gameId}`)
+            }
+        }
+    } catch (error) {
+        console.error('Error syncing wallet balance to pool:', error)
+        // Don't throw - continue even if sync fails
+    }
+}
+
 // Get or create current game for a channel
-function getOrCreateGame(spaceId: string, channelId: string): Game {
+async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game> {
     let game = db.getCurrentGame(spaceId, channelId)
     if (!game) {
         const targetWord = getRandomWord()
         game = db.createGame(spaceId, channelId, targetWord)
+        // Sync on-chain balance to pool on new game creation (recovery after restart)
+        await syncWalletBalanceToPool(game.id)
     }
     return game
 }
@@ -89,7 +115,12 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
         throw new Error('No funds to payout')
     }
 
-    // Get winner address (assuming userId is the address)
+    // userId is the winner's smart account wallet address (hex with 0x prefix)
+    // Validate it's a proper address format
+    if (!winnerUserId || !winnerUserId.startsWith('0x') || winnerUserId.length !== 42) {
+        throw new Error(`Invalid winner address format: ${winnerUserId}`)
+    }
+    
     const winnerAddress = winnerUserId as Address
 
     const calls = plan.map(p => {
@@ -222,7 +253,7 @@ bot.onTip(async (handler, event) => {
         return
     }
 
-    const game = getOrCreateGame(event.spaceId, event.channelId)
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
 
     // Skip if game is in payout pending state
     if (game.state === 'PAYOUT_PENDING') {
@@ -253,7 +284,7 @@ bot.onTip(async (handler, event) => {
 
 // Slash command: /wordle (show status/help only)
 bot.onSlashCommand('wordle', async (handler, event) => {
-    const game = getOrCreateGame(event.spaceId, event.channelId)
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
 
     // Default: show game status and help
     const eligibleCount = db.getEligiblePlayers(game.id).length
@@ -372,7 +403,7 @@ async function processGuess(
 
 // Slash command: /guess
 bot.onSlashCommand('guess', async (handler, event) => {
-    const game = getOrCreateGame(event.spaceId, event.channelId)
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
     const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
     
     await processGuess(handler, game, event.userId, event.spaceId, event.channelId, guess, event.eventId)
@@ -391,14 +422,14 @@ bot.onMessage(async (handler, event) => {
     
     // Only process if it's exactly 5 characters and looks like a word
     if (cleanMessage.length === 5 && /^[a-z]{5}$/i.test(cleanMessage)) {
-        const game = getOrCreateGame(event.spaceId, event.channelId)
+        const game = await getOrCreateGame(event.spaceId, event.channelId)
         await processGuess(handler, game, event.userId, event.spaceId, event.channelId, cleanMessage, event.threadId)
     }
 })
 
 // Slash command: /pool
 bot.onSlashCommand('pool', async (handler, event) => {
-    const game = getOrCreateGame(event.spaceId, event.channelId)
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
     await handler.sendMessage(event.channelId, formatPool(game))
 })
 
