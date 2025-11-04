@@ -72,13 +72,31 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
     const tokens = db.getPoolTokens(game.id)
     const plan: Array<{ token: string; amount: bigint }> = []
 
+    console.log(`[buildPayoutPlan] Game ${game.id}, tokens in pool:`, tokens)
+
+    // If no tracked tokens, check wallet balance directly (fallback)
+    if (tokens.length === 0) {
+        try {
+            const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+            console.log(`[buildPayoutPlan] No tracked tokens, checking wallet balance: ${formatUnits(nativeBalance, 18)} ETH`)
+            if (nativeBalance > 0n) {
+                plan.push({ token: 'NATIVE', amount: nativeBalance })
+                return plan
+            }
+        } catch (error) {
+            console.error('[buildPayoutPlan] Error checking wallet balance:', error)
+        }
+    }
+
     for (const token of tokens) {
         const tracked = db.getPoolBalance(game.id, token)
+        console.log(`[buildPayoutPlan] Token ${token}, tracked: ${formatUnits(tracked, 18)}`)
 
         let actual: bigint
         try {
             if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
                 actual = await getBalance(bot.viem, { address: bot.appAddress })
+                console.log(`[buildPayoutPlan] NATIVE actual balance: ${formatUnits(actual, 18)} ETH`)
             } else {
                 // Validate it's a valid address before calling contract
                 if (!token.startsWith('0x') || token.length !== 42) {
@@ -91,28 +109,45 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
                     functionName: 'balanceOf',
                     args: [bot.appAddress],
                 }) as bigint
+                console.log(`[buildPayoutPlan] ERC20 ${token} actual balance: ${formatUnits(actual, 18)}`)
             }
         } catch (error) {
-            console.error(`Error getting balance for token ${token}:`, error)
+            console.error(`[buildPayoutPlan] Error getting balance for token ${token}:`, error)
             // Skip this token if we can't get its balance
             continue
         }
 
-        const amount = actual < tracked ? actual : tracked
+        // Use the minimum of tracked vs actual, but prefer actual if tracked is 0
+        const amount = tracked > 0n ? (actual < tracked ? actual : tracked) : actual
+        console.log(`[buildPayoutPlan] Final amount for ${token}: ${formatUnits(amount, 18)}`)
+        
         if (amount > 0n) {
-            plan.push({ token: token === 'NATIVE' || token === zeroAddress || !token || token.length === 0 ? 'NATIVE' : token, amount })
+            const normalizedToken = token === 'NATIVE' || token === zeroAddress || !token || token.length === 0 ? 'NATIVE' : token
+            plan.push({ token: normalizedToken, amount })
         }
     }
 
+    console.log(`[buildPayoutPlan] Final plan:`, plan.map(p => `${formatUnits(p.amount, 18)} ${p.token}`))
     return plan
 }
 
 // Execute payout
 async function executePayout(game: Game, winnerUserId: string): Promise<string> {
+    console.log(`[executePayout] Starting payout for game ${game.id}, winner: ${winnerUserId}`)
+    console.log(`[executePayout] Bot wallet address: ${bot.appAddress}`)
+    
     const plan = await buildPayoutPlan(game)
 
     if (plan.length === 0) {
-        throw new Error('No funds to payout')
+        // Check wallet balance one more time for debugging
+        try {
+            const walletBalance = await getBalance(bot.viem, { address: bot.appAddress })
+            console.error(`[executePayout] No funds in plan. Wallet balance: ${formatUnits(walletBalance, 18)} ETH`)
+            console.error(`[executePayout] Pool tokens:`, db.getPoolTokens(game.id))
+            throw new Error(`No funds to payout. Wallet has ${formatUnits(walletBalance, 18)} ETH but plan is empty. Check if tips are going to ${bot.appAddress}`)
+        } catch (error) {
+            throw new Error(`No funds to payout: ${error instanceof Error ? error.message : 'Unknown error'}`)
+        }
     }
 
     // userId is the winner's smart account wallet address (hex with 0x prefix)
@@ -266,6 +301,8 @@ bot.onTip(async (handler, event) => {
 
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
     db.addDeposit(game.id, event.senderAddress, token, event.amount)
+    console.log(`[onTip] Tip received: ${formatUnits(event.amount, 18)} ${token === 'NATIVE' ? 'ETH' : token} from ${event.senderAddress} for game ${game.id}`)
+    console.log(`[onTip] Bot wallet: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
     // Mark tipper as eligible to play (store both senderAddress and userId to handle all cases)
     // Always add both identifiers to ensure eligibility regardless of which one is used later
