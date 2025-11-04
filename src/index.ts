@@ -13,6 +13,8 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
     baseRpcUrl: process.env.BASE_RPC_URL || 'https://mainnet.base.org',
 })
 
+console.log(`[Bot Init] Bot wallet address: ${bot.appAddress}`)
+
 // Sync on-chain wallet balance to pool (for recovery after restart)
 async function syncWalletBalanceToPool(gameId: string): Promise<void> {
     try {
@@ -56,13 +58,17 @@ async function formatPool(game: Game): Promise<string> {
     // Always check actual on-chain NATIVE (ETH) balance
     let nativeBalance = 0n
     try {
+        console.log(`[formatPool] Checking balance for bot wallet: ${bot.appAddress}`)
         nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-        if (nativeBalance > 0n) {
-            const formatted = formatUnits(nativeBalance, 18)
-            lines.push(`• ${formatted} ETH`)
-        }
+        console.log(`[formatPool] Wallet balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        
+        // Always show balance, even if 0 (so user knows we checked)
+        const formatted = formatUnits(nativeBalance, 18)
+        lines.push(`• ${formatted} ETH`)
     } catch (error) {
         console.error('[formatPool] Error getting wallet balance:', error)
+        // Show error message to user
+        lines.push(`• Error checking wallet balance: ${error instanceof Error ? error.message : 'Unknown error'}`)
     }
 
     // Check for ERC20 tokens that were tipped (from tracked deposits)
@@ -99,7 +105,7 @@ async function formatPool(game: Game): Promise<string> {
         return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
     }
 
-    return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}`
+    return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}\n\n_Bot wallet: \`${bot.appAddress}\`_`
 }
 
 // Build payout plan - always use on-chain wallet balance (source of truth)
