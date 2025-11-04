@@ -230,8 +230,16 @@ class Database {
 
     isEligiblePlayer(gameId: string, userId: string): boolean {
         const normalized = userId.toLowerCase()
+        
+        // Check direct eligibility list
         const players = this.eligiblePlayers.get(gameId)
-        return players ? players.has(normalized) : false
+        if (players && players.has(normalized)) {
+            return true
+        }
+        
+        // Also check if userId matches any deposit sender (handles address format mismatches)
+        const deposits = this.getDeposits(gameId)
+        return deposits.some(d => d.sender.toLowerCase() === normalized)
     }
 
     getEligiblePlayers(gameId: string): string[] {

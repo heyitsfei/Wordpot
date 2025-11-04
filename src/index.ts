@@ -220,15 +220,17 @@ bot.onTip(async (handler, event) => {
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
     db.addDeposit(game.id, event.senderAddress, token, event.amount)
     
-    // Mark tipper as eligible to play
-    db.addEligiblePlayer(game.id, event.senderAddress)
+    // Mark tipper as eligible to play (store both senderAddress and userId to handle all cases)
+    // Always add both identifiers to ensure eligibility regardless of which one is used later
+    db.addEligiblePlayer(game.id, event.userId) // Towns user ID (used in slash commands)
+    db.addEligiblePlayer(game.id, event.senderAddress) // Wallet address that sent the tip
 
     const formatted = formatUnits(event.amount, 18)
     const symbol = token === 'NATIVE' ? 'ETH' : token.slice(0, 6) + '...'
 
     await handler.sendMessage(
         event.channelId,
-        `💰 Tip received from <@${event.senderAddress}>! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n` +
+        `💰 Tip received from <@${event.userId}>! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n` +
         `✅ You're now eligible to play and win this round!\n\n${formatPool(game)}`,
     )
 })
