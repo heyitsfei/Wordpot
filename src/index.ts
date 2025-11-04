@@ -50,20 +50,31 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
         const tracked = db.getPoolBalance(game.id, token)
 
         let actual: bigint
-        if (token === 'NATIVE') {
-            actual = await getBalance(bot.viem, { address: bot.appAddress })
-        } else {
-            actual = await readContract(bot.viem, {
-                address: token as Address,
-                abi: erc20Abi,
-                functionName: 'balanceOf',
-                args: [bot.appAddress],
-            }) as bigint
+        try {
+            if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
+                actual = await getBalance(bot.viem, { address: bot.appAddress })
+            } else {
+                // Validate it's a valid address before calling contract
+                if (!token.startsWith('0x') || token.length !== 42) {
+                    console.warn(`Invalid token address: ${token}, skipping`)
+                    continue
+                }
+                actual = await readContract(bot.viem, {
+                    address: token as Address,
+                    abi: erc20Abi,
+                    functionName: 'balanceOf',
+                    args: [bot.appAddress],
+                }) as bigint
+            }
+        } catch (error) {
+            console.error(`Error getting balance for token ${token}:`, error)
+            // Skip this token if we can't get its balance
+            continue
         }
 
         const amount = actual < tracked ? actual : tracked
         if (amount > 0n) {
-            plan.push({ token, amount })
+            plan.push({ token: token === 'NATIVE' || token === zeroAddress || !token || token.length === 0 ? 'NATIVE' : token, amount })
         }
     }
 
@@ -82,13 +93,18 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     const winnerAddress = winnerUserId as Address
 
     const calls = plan.map(p => {
-        if (p.token === 'NATIVE') {
+        // Handle NATIVE (ETH) or zeroAddress
+        if (p.token === 'NATIVE' || p.token === zeroAddress || !p.token || p.token.length === 0) {
             return {
                 to: winnerAddress,
                 data: '0x' as const,
                 value: p.amount,
             }
         } else {
+            // Validate ERC20 token address
+            if (!p.token.startsWith('0x') || p.token.length !== 42) {
+                throw new Error(`Invalid token address: ${p.token}`)
+            }
             return {
                 to: p.token as Address,
                 abi: erc20Abi,
@@ -266,14 +282,21 @@ bot.onSlashCommand('wordle', async (handler, event) => {
     await handler.sendMessage(event.channelId, message)
 })
 
-// Slash command: /guess
-bot.onSlashCommand('guess', async (handler, event) => {
-    const game = getOrCreateGame(event.spaceId, event.channelId)
-    const threadOpts = { threadId: event.eventId }
+// Process a guess (shared logic for /guess and thread messages)
+async function processGuess(
+    handler: any,
+    game: Game,
+    userId: string,
+    spaceId: string,
+    channelId: string,
+    guess: string,
+    threadId?: string,
+) {
+    const threadOpts = threadId ? { threadId } : undefined
 
     if (game.state === 'PAYOUT_PENDING') {
         await handler.sendMessage(
-            event.channelId,
+            channelId,
             `⏳ Game #${game.gameNumber} is being paid out. A new game will start soon!`,
             threadOpts,
         )
@@ -281,9 +304,9 @@ bot.onSlashCommand('guess', async (handler, event) => {
     }
 
     // Check if user has tipped to be eligible
-    if (!db.isEligiblePlayer(game.id, event.userId)) {
+    if (!db.isEligiblePlayer(game.id, userId)) {
         await handler.sendMessage(
-            event.channelId,
+            channelId,
             `❌ You must tip the bot to play this round and be eligible to win!\n\n` +
             `Tip any amount to join Game #${game.gameNumber}. Only players who have tipped can guess and win the prize pool.`,
             threadOpts,
@@ -291,34 +314,34 @@ bot.onSlashCommand('guess', async (handler, event) => {
         return
     }
 
-    // Word is the first arg now
-    const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
-    if (!guess) {
-        await handler.sendMessage(event.channelId, 'Usage: `/guess <word>` (5 letters)', threadOpts)
+    // Clean and validate guess
+    const cleanGuess = guess.replace(/\s+/g, '').toLowerCase().trim()
+    if (!cleanGuess) {
+        await handler.sendMessage(channelId, 'Usage: `/guess <word>` or just type a 5-letter word (5 letters)', threadOpts)
         return
     }
 
-    if (guess.length !== 5) {
-        await handler.sendMessage(event.channelId, '❌ Guess must be exactly 5 letters!', threadOpts)
+    if (cleanGuess.length !== 5) {
+        await handler.sendMessage(channelId, '❌ Guess must be exactly 5 letters!', threadOpts)
         return
     }
 
-    if (!isValidWord(guess)) {
-        await handler.sendMessage(event.channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).', threadOpts)
+    if (!isValidWord(cleanGuess)) {
+        await handler.sendMessage(channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).', threadOpts)
         return
     }
 
-    const feedback = computeFeedback(guess, game.targetWord)
-    db.addGuess(game.id, event.userId, guess, feedback.emoji)
+    const feedback = computeFeedback(cleanGuess, game.targetWord)
+    db.addGuess(game.id, userId, cleanGuess, feedback.emoji)
 
-    const userGuesses = db.getUserGuesses(game.id, event.userId)
+    const userGuesses = db.getUserGuesses(game.id, userId)
     const guessNumber = userGuesses.length
 
     if (isCorrect(feedback)) {
-        const locked = await db.casToPayoutPending(game.id, event.userId)
+        const locked = await db.casToPayoutPending(game.id, userId)
         if (!locked) {
             await handler.sendMessage(
-                event.channelId,
+                channelId,
                 `❌ Too late! Someone else already won Game #${game.gameNumber}.`,
                 threadOpts,
             )
@@ -326,24 +349,50 @@ bot.onSlashCommand('guess', async (handler, event) => {
         }
 
         try {
-            const txHash = await executePayout(game, event.userId)
-            await announceWinner(game, event.userId, await buildPayoutPlan(game), txHash)
-            await startNewGame(event.spaceId, event.channelId)
+            const txHash = await executePayout(game, userId)
+            await announceWinner(game, userId, await buildPayoutPlan(game), txHash)
+            await startNewGame(spaceId, channelId)
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : 'Unknown error'
             await handler.sendMessage(
-                event.channelId,
+                channelId,
                 `⚠️ Payout failed: ${errorMsg}. Game #${game.gameNumber} is locked. Please contact admin.`,
                 threadOpts,
             )
         }
     } else {
-        const feedbackText = formatFeedback(guess, feedback)
+        const feedbackText = formatFeedback(cleanGuess, feedback)
         await handler.sendMessage(
-            event.channelId,
+            channelId,
             `**Guess #${guessNumber}:**\n${feedbackText}`,
             threadOpts,
         )
+    }
+}
+
+// Slash command: /guess
+bot.onSlashCommand('guess', async (handler, event) => {
+    const game = getOrCreateGame(event.spaceId, event.channelId)
+    const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
+    
+    await processGuess(handler, game, event.userId, event.spaceId, event.channelId, guess, event.eventId)
+})
+
+// Handle messages in threads (allow guesses in thread replies)
+bot.onMessage(async (handler, event) => {
+    // Only process if in a thread and message looks like a guess (exactly 5 letters, alphanumeric)
+    if (!event.threadId) {
+        return
+    }
+
+    // Check if message is a valid 5-letter word
+    const message = event.message.trim()
+    const cleanMessage = message.replace(/\s+/g, '').toLowerCase()
+    
+    // Only process if it's exactly 5 characters and looks like a word
+    if (cleanMessage.length === 5 && /^[a-z]{5}$/i.test(cleanMessage)) {
+        const game = getOrCreateGame(event.spaceId, event.channelId)
+        await processGuess(handler, game, event.userId, event.spaceId, event.channelId, cleanMessage, event.threadId)
     }
 })
 
