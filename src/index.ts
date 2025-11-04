@@ -49,69 +49,54 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
     return game
 }
 
-// Format pool display
+// Format pool display - always shows current on-chain wallet balance
 async function formatPool(game: Game): Promise<string> {
-    const tokens = db.getPoolTokens(game.id)
+    const lines: string[] = []
     
-    // Always check actual wallet balance for NATIVE token
+    // Always check actual on-chain NATIVE (ETH) balance
     let nativeBalance = 0n
     try {
         nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        if (nativeBalance > 0n) {
+            const formatted = formatUnits(nativeBalance, 18)
+            lines.push(`• ${formatted} ETH`)
+        }
     } catch (error) {
         console.error('[formatPool] Error getting wallet balance:', error)
     }
 
-    // If no tracked tokens but wallet has balance, show wallet balance
-    if (tokens.length === 0) {
-        if (nativeBalance > 0n) {
-            const formatted = formatUnits(nativeBalance, 18)
-            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} ETH (from wallet)`
-        }
-        return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
-    }
-
-    const lines: string[] = []
-    
-    for (const token of tokens) {
-        const tracked = db.getPoolBalance(game.id, token)
-        
-        let actual: bigint
-        let displayAmount: bigint
-        
+    // Check for ERC20 tokens that were tipped (from tracked deposits)
+    const trackedTokens = db.getPoolTokens(game.id)
+    for (const token of trackedTokens) {
+        // Skip NATIVE, already handled above
         if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
-            // Use actual wallet balance for NATIVE
-            actual = nativeBalance
-            displayAmount = actual // Always show actual balance for NATIVE
-        } else {
-            // For ERC20 tokens, try to get actual balance
+            continue
+        }
+
+        // Validate token address and get actual on-chain balance
+        if (token.startsWith('0x') && token.length === 42) {
             try {
-                if (token.startsWith('0x') && token.length === 42) {
-                    actual = await readContract(bot.viem, {
-                        address: token as Address,
-                        abi: erc20Abi,
-                        functionName: 'balanceOf',
-                        args: [bot.appAddress],
-                    }) as bigint
-                    displayAmount = actual // Use actual balance for ERC20 too
-                } else {
-                    displayAmount = tracked // Fallback to tracked if invalid address
+                const balance = await readContract(bot.viem, {
+                    address: token as Address,
+                    abi: erc20Abi,
+                    functionName: 'balanceOf',
+                    args: [bot.appAddress],
+                }) as bigint
+                
+                if (balance > 0n) {
+                    const formatted = formatUnits(balance, 18)
+                    const symbol = token.slice(0, 6) + '...'
+                    lines.push(`• ${formatted} ${symbol}`)
                 }
             } catch (error) {
                 console.error(`[formatPool] Error getting ERC20 balance for ${token}:`, error)
-                displayAmount = tracked // Fallback to tracked on error
+                // Skip this token if we can't get balance
             }
         }
+    }
 
-        const formatted = formatUnits(displayAmount, 18)
-        const symbol = token === 'NATIVE' ? 'ETH' : token.slice(0, 6) + '...'
-        
-        // Show tracked vs actual if they differ
-        if (tracked !== displayAmount && tracked > 0n) {
-            const trackedFormatted = formatUnits(tracked, 18)
-            lines.push(`• ${formatted} ${symbol} (tracked: ${trackedFormatted})`)
-        } else {
-            lines.push(`• ${formatted} ${symbol}`)
-        }
+    if (lines.length === 0) {
+        return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
     }
 
     return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}`
