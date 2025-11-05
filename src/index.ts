@@ -76,6 +76,8 @@ async function formatPool(game: Game): Promise<string> {
 
     // Check for ERC20 tokens that were tipped (from tracked deposits)
     const trackedTokens = db.getPoolTokens(game.id)
+    console.log(`[formatPool] Tracked tokens:`, trackedTokens)
+    
     for (const token of trackedTokens) {
         // Skip NATIVE, already handled above
         if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
@@ -85,12 +87,15 @@ async function formatPool(game: Game): Promise<string> {
         // Validate token address and get actual on-chain balance
         if (token.startsWith('0x') && token.length === 42) {
             try {
+                console.log(`[formatPool] Checking ERC20 token ${token} balance`)
                 const balance = await readContract(bot.viem, {
                     address: token as Address,
                     abi: erc20Abi,
                     functionName: 'balanceOf',
                     args: [bot.appAddress],
                 }) as bigint
+                
+                console.log(`[formatPool] Token ${token} balance: ${formatUnits(balance, 18)}`)
                 
                 if (balance > 0n) {
                     const formatted = formatUnits(balance, 18)
@@ -101,6 +106,8 @@ async function formatPool(game: Game): Promise<string> {
                 console.error(`[formatPool] Error getting ERC20 balance for ${token}:`, error)
                 // Skip this token if we can't get balance
             }
+        } else {
+            console.warn(`[formatPool] Invalid token address format: ${token}`)
         }
     }
 
@@ -338,6 +345,25 @@ bot.onTip(async (handler, event) => {
     db.addDeposit(game.id, event.senderAddress, token, event.amount)
     console.log(`[onTip] Tip received: ${formatUnits(event.amount, 18)} ${token === 'NATIVE' ? 'ETH' : token} from ${event.senderAddress} for game ${game.id}`)
     console.log(`[onTip] Bot wallet: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
+    console.log(`[onTip] Currency address: ${event.currency}, Token: ${token}`)
+    
+    // Immediately check balance after tip to verify it was received
+    try {
+        if (token === 'NATIVE') {
+            const balance = await getBalance(bot.viem, { address: bot.appAddress })
+            console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} ETH`)
+        } else {
+            const balance = await readContract(bot.viem, {
+                address: token as Address,
+                abi: erc20Abi,
+                functionName: 'balanceOf',
+                args: [bot.appAddress],
+            }) as bigint
+            console.log(`[onTip] App contract ${token} balance after tip: ${formatUnits(balance, 18)}`)
+        }
+    } catch (error) {
+        console.error(`[onTip] Error checking balance after tip:`, error)
+    }
     
     // Mark tipper as eligible to play (store both senderAddress and userId to handle all cases)
     // Always add both identifiers to ensure eligibility regardless of which one is used later
