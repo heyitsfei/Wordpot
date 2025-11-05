@@ -1,33 +1,33 @@
 // Wordle game logic
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-// Common 5-letter words from Wordle's word list
-const WORD_LIST = [
-    'apple', 'beach', 'crane', 'dance', 'earth', 'fancy', 'grace', 'heart',
-    'ideal', 'jolly', 'kneel', 'laugh', 'magic', 'noble', 'ocean', 'peace',
-    'queen', 'reach', 'sweet', 'tiger', 'uncle', 'vocal', 'world', 'young',
-    'zebra', 'blade', 'crown', 'drown', 'flame', 'globe', 'horse', 'image',
-    'joust', 'knife', 'light', 'march', 'north', 'orbit', 'paint', 'quiet',
-    'roast', 'shade', 'taste', 'ultra', 'vault', 'waste', 'xerox', 'yacht',
-    'abuse', 'brick', 'charm', 'draft', 'elope', 'fault', 'ghost', 'hinge',
-    'inbox', 'joint', 'knead', 'leash', 'marsh', 'nudge', 'oxide', 'pouch',
-    'quill', 'retch', 'shelf', 'trunk', 'unzip', 'vivid', 'waltz', 'xylem',
-    'yield', 'admit', 'blink', 'crack', 'drift', 'erupt', 'flick', 'grasp',
-    'hound', 'inlet', 'jewel', 'knack', 'latch', 'mimic', 'nymph', 'opera',
-    'pluck', 'quack', 'rivet', 'scoop', 'twist', 'unfit', 'vapor', 'wharf',
-    'xerox', 'yummy', 'abyss', 'brisk', 'clasp', 'dread', 'epoxy', 'frock',
-    'gloom', 'hitch', 'infer', 'joust', 'kneel', 'lurch', 'mirth', 'nudge',
-    'outdo', 'plaid', 'quash', 'robin', 'swoop', 'tweak', 'unify', 'verve',
-    'wince', 'xylem', 'yacht', 'abide', 'brink', 'climb', 'drape', 'elbow',
-    'fiber', 'groan', 'hasty', 'incur', 'jolly', 'knock', 'lodge', 'mirth',
-    'noble', 'ocean', 'piano', 'quilt', 'radar', 'swoon', 'throb', 'unzip',
-    'vague', 'waltz', 'xenon', 'yield', 'abort', 'broom', 'cleft', 'drown',
-    'elude', 'frock', 'gloom', 'hitch', 'infer', 'joust', 'kneel', 'lurch',
-    'mirth', 'nudge', 'outdo', 'plaid', 'quash', 'robin', 'swoop', 'tweak',
-    'unify', 'verve', 'wince', 'xylem', 'yacht',
-]
+// Get directory path (works in ESM)
+const __dirname: string = dirname(fileURLToPath(import.meta.url))
 
-// Create a Set for O(1) lookup
-const VALID_WORDS = new Set(WORD_LIST.map(word => word.toLowerCase()))
+// Load solution words (2,315 words that can be the winning word)
+const SOLUTION_WORDS_FILE = join(__dirname, 'wordlists', 'wordle-solutions.txt')
+const SOLUTION_WORDS = readFileSync(SOLUTION_WORDS_FILE, 'utf-8')
+    .trim()
+    .split('\n')
+    .map(word => word.toLowerCase().trim())
+    .filter(word => word.length === 5)
+
+// Load guess dictionary (all valid 5-letter words that can be guessed)
+const GUESS_DICTIONARY_FILE = join(__dirname, 'wordlists', 'guess-dictionary.txt')
+const GUESS_WORDS = readFileSync(GUESS_DICTIONARY_FILE, 'utf-8')
+    .trim()
+    .split('\n')
+    .map(word => word.toLowerCase().trim())
+    .filter(word => word.length === 5)
+
+// Create Sets for O(1) lookup
+const SOLUTION_WORDS_SET = new Set(SOLUTION_WORDS)
+const GUESS_WORDS_SET = new Set(GUESS_WORDS)
+
+console.log(`[Game] Loaded ${SOLUTION_WORDS.length} solution words`)
+console.log(`[Game] Loaded ${GUESS_WORDS.length} guess dictionary words`)
 
 export type Feedback = {
     letters: Array<'green' | 'yellow' | 'gray'>
@@ -93,19 +93,19 @@ export function isCorrect(feedback: Feedback): boolean {
 }
 
 /**
- * Check if a word is valid (5 letters, alphabetic only, and exists in dictionary)
+ * Check if a word is valid (5 letters, alphabetic only, and exists in guess dictionary)
  */
 export function isValidWord(word: string): boolean {
     const normalized = word.toLowerCase().trim()
-    // Must be exactly 5 letters, alphabetic only, and in the word list
-    return normalized.length === 5 && /^[a-z]{5}$/.test(normalized) && VALID_WORDS.has(normalized)
+    // Must be exactly 5 letters, alphabetic only, and in the guess dictionary
+    return normalized.length === 5 && /^[a-z]{5}$/.test(normalized) && GUESS_WORDS_SET.has(normalized)
 }
 
 /**
- * Get a random word from the word list
+ * Get a random solution word (from the 2,315 solution words)
  */
 export function getRandomWord(): string {
-    return WORD_LIST[Math.floor(Math.random() * WORD_LIST.length)]
+    return SOLUTION_WORDS[Math.floor(Math.random() * SOLUTION_WORDS.length)]
 }
 
 /**
