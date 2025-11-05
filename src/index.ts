@@ -285,18 +285,36 @@ bot.onTip(async (handler, event) => {
 
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
     
+    console.log(`[onTip] Currency address: ${event.currency}`)
+    console.log(`[onTip] Zero address: ${zeroAddress}`)
+    console.log(`[onTip] Currency === zeroAddress: ${event.currency === zeroAddress}`)
+    console.log(`[onTip] Currency.toLowerCase(): ${event.currency.toLowerCase()}`)
+    console.log(`[onTip] Zero address.toLowerCase(): ${zeroAddress.toLowerCase()}`)
+    
     // Bot app contract only accepts Base Sepolia ETH (native), reject ERC20 tokens
-    if (token !== 'NATIVE' && token !== zeroAddress) {
-        console.log(`[onTip] Rejected non-NATIVE tip: ${token} from ${event.senderAddress}`)
+    // Check if it's native ETH: currency is zeroAddress OR common native ETH representations
+    const currencyLower = event.currency.toLowerCase()
+    const zeroAddressLower = zeroAddress.toLowerCase()
+    const isNative = currencyLower === zeroAddressLower || 
+                     currencyLower === '0x0000000000000000000000000000000000000000' ||
+                     currencyLower === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+    
+    console.log(`[onTip] isNative check: ${isNative}`)
+    
+    if (!isNative) {
+        console.log(`[onTip] Rejected non-NATIVE tip: currency=${event.currency}, token=${token} from ${event.senderAddress}`)
         await handler.sendMessage(
             event.channelId,
             `❌ Tip rejected: Bot only accepts Base Sepolia ETH (native), not ERC20 tokens.\n\n` +
-            `Please tip with Base Sepolia ETH to play and win! 💰`,
+            `Received currency: \`${event.currency}\`\n` +
+            `Please tip with Base Sepolia ETH (native) to play and win! 💰`,
         )
         return
     }
     
-    db.addDeposit(game.id, event.senderAddress, 'NATIVE', event.amount)
+    // Store as NATIVE regardless of how currency was represented
+    const depositToken = 'NATIVE'
+    db.addDeposit(game.id, event.senderAddress, depositToken, event.amount)
     console.log(`[onTip] Base Sepolia ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
     console.log(`[onTip] App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
