@@ -11,8 +11,12 @@ import { dirname } from 'node:path'
 // Get directory path
 const __dirname: string = dirname(fileURLToPath(import.meta.url))
 
-// Create SQLite database file (in project root)
-const dbPath = join(__dirname, '../../wordpot.db')
+// Create SQLite database file
+// Use DATABASE_PATH env var if set (for persistent volumes on Render), otherwise use project root
+const defaultDbPath = join(__dirname, '../../wordpot.db')
+const dbPath = process.env.DATABASE_PATH || defaultDbPath
+console.log(`[DB] Using database path: ${dbPath}`)
+
 const sqlite = new Database(dbPath)
 export const db = drizzle(sqlite, { schema })
 

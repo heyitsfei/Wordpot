@@ -1,4 +1,4 @@
-import { makeTownsBot } from '@towns-protocol/bot'
+import { makeTownsBot, getSmartAccountFromUserId } from '@towns-protocol/bot'
 import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { execute } from 'viem/experimental/erc7821'
@@ -148,8 +148,27 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
 
 // Execute payout
 async function executePayout(game: Game, winnerUserId: string): Promise<string> {
-    console.log(`[executePayout] Starting payout for game ${game.id}, winner: ${winnerUserId}`)
+    // winnerUserId is the user's root address (from event.userId)
+    // We need to get their smart account address using getSmartAccountFromUserId
+    console.log(`[executePayout] Starting payout for game ${game.id}`)
+    console.log(`[executePayout] Winner user ID (root address): ${winnerUserId}`)
     console.log(`[executePayout] App contract address (funds source): ${bot.appAddress}`)
+    
+    // Validate winnerUserId is a proper Ethereum address format
+    if (!winnerUserId || !winnerUserId.startsWith('0x') || winnerUserId.length !== 42) {
+        throw new Error(`Invalid winner user ID format: ${winnerUserId}`)
+    }
+    
+    // Get the winner's smart account address from their user ID (root address)
+    const winnerSmartAccountAddress = await getSmartAccountFromUserId(bot, {
+        userId: winnerUserId as Address,
+    })
+    
+    if (!winnerSmartAccountAddress) {
+        throw new Error(`No smart account found for user ${winnerUserId}. User may not have deployed a smart account yet.`)
+    }
+    
+    console.log(`[executePayout] Winner's smart account address: ${winnerSmartAccountAddress}`)
     
     const plan = await buildPayoutPlan(game)
 
@@ -164,20 +183,15 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
             throw new Error(`No funds to payout: ${error instanceof Error ? error.message : 'Unknown error'}`)
         }
     }
-
-    // userId is the winner's smart account wallet address (hex with 0x prefix)
-    // Validate it's a proper address format
-    if (!winnerUserId || !winnerUserId.startsWith('0x') || winnerUserId.length !== 42) {
-        throw new Error(`Invalid winner address format: ${winnerUserId}`)
-    }
     
-    const winnerAddress = winnerUserId as Address
+    console.log(`[executePayout] Sending payout to winner's smart account: ${winnerSmartAccountAddress}`)
 
     const calls = plan.map(p => {
         // Handle NATIVE (ETH) or zeroAddress
         if (p.token === 'NATIVE' || p.token === zeroAddress || !p.token || p.token.length === 0) {
+            // Send native ETH directly to winner's smart account address
             return {
-                to: winnerAddress,
+                to: winnerSmartAccountAddress,
                 data: '0x' as const,
                 value: p.amount,
             }
@@ -186,14 +200,17 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
             if (!p.token.startsWith('0x') || p.token.length !== 42) {
                 throw new Error(`Invalid token address: ${p.token}`)
             }
+            // Transfer ERC20 token to winner's smart account address
             return {
                 to: p.token as Address,
                 abi: erc20Abi,
                 functionName: 'transfer' as const,
-                args: [winnerAddress, p.amount],
+                args: [winnerSmartAccountAddress, p.amount],
             }
         }
     })
+    
+    console.log(`[executePayout] Executing payout transaction with ${calls.length} call(s) to winner's smart account: ${winnerSmartAccountAddress}`)
 
     const txHash = await execute(bot.viem, {
         address: bot.appAddress,
@@ -202,6 +219,8 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     })
 
     await waitForTransactionReceipt(bot.viem, { hash: txHash })
+    console.log(`[executePayout] Payout transaction confirmed: ${txHash}`)
+    console.log(`[executePayout] Funds sent to winner's smart account: ${winnerSmartAccountAddress}`)
 
     // Small delay to ensure balance updates are propagated in RPC node
     // Some RPC nodes may have slight delay in reflecting balance changes
