@@ -53,120 +53,47 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
     return game
 }
 
-// Format pool display - always shows current on-chain wallet balance
+// Format pool display - always shows current on-chain Base ETH balance
+// Bot app contract only accepts Base ETH (native), not ERC20 tokens
 async function formatPool(game: Game): Promise<string> {
-    const lines: string[] = []
-    
-    // Always check actual on-chain NATIVE (ETH) balance from app contract
+    // Always check actual on-chain NATIVE (Base ETH) balance from app contract
     // This is where all tips go: bot.appAddress (app contract)
     let nativeBalance = 0n
     try {
-        console.log(`[formatPool] Checking balance for app contract: ${bot.appAddress}`)
+        console.log(`[formatPool] Checking Base ETH balance for app contract: ${bot.appAddress}`)
         nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-        console.log(`[formatPool] App contract balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[formatPool] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
-        // Always show balance, even if 0 (so user knows we checked)
         const formatted = formatUnits(nativeBalance, 18)
-        lines.push(`• ${formatted} ETH`)
-    } catch (error) {
-        console.error('[formatPool] Error getting wallet balance:', error)
-        // Show error message to user
-        lines.push(`• Error checking wallet balance: ${error instanceof Error ? error.message : 'Unknown error'}`)
-    }
-
-    // Check for ERC20 tokens that were tipped (from tracked deposits)
-    const trackedTokens = db.getPoolTokens(game.id)
-    console.log(`[formatPool] Tracked tokens:`, trackedTokens)
-    
-    for (const token of trackedTokens) {
-        // Skip NATIVE, already handled above
-        if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
-            continue
-        }
-
-        // Validate token address and get actual on-chain balance
-        if (token.startsWith('0x') && token.length === 42) {
-            try {
-                console.log(`[formatPool] Checking ERC20 token ${token} balance`)
-                const balance = await readContract(bot.viem, {
-                    address: token as Address,
-                    abi: erc20Abi,
-                    functionName: 'balanceOf',
-                    args: [bot.appAddress],
-                }) as bigint
-                
-                console.log(`[formatPool] Token ${token} balance: ${formatUnits(balance, 18)}`)
-                
-                if (balance > 0n) {
-                    const formatted = formatUnits(balance, 18)
-                    const symbol = token.slice(0, 6) + '...'
-                    lines.push(`• ${formatted} ${symbol}`)
-                }
-            } catch (error) {
-                console.error(`[formatPool] Error getting ERC20 balance for ${token}:`, error)
-                // Skip this token if we can't get balance
-            }
+        
+        if (nativeBalance > 0n) {
+            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} Base ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
         } else {
-            console.warn(`[formatPool] Invalid token address format: ${token}`)
+            return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 Base ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_\n\n💡 Tip the bot with Base ETH to add to the prize pool!`
         }
+    } catch (error) {
+        console.error('[formatPool] Error getting Base ETH balance:', error)
+        return `**Prize Pool (Game #${game.gameNumber}):**\n• Error checking balance: ${error instanceof Error ? error.message : 'Unknown error'}\n\n_App contract: \`${bot.appAddress}\`_`
     }
-
-    if (lines.length === 0) {
-        return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
-    }
-
-    return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
 }
 
-// Build payout plan - always use on-chain wallet balance (source of truth)
+// Build payout plan - always use on-chain Base ETH balance (source of truth)
+// Bot app contract only accepts Base ETH, not ERC20 tokens
 async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amount: bigint }>> {
     const plan: Array<{ token: string; amount: bigint }> = []
 
-    console.log(`[buildPayoutPlan] Game ${game.id}, checking on-chain wallet balance`)
+    console.log(`[buildPayoutPlan] Game ${game.id}, checking Base ETH balance from app contract`)
 
-    // Always check NATIVE (ETH) balance from app contract (where tips are held)
+    // Always check NATIVE (Base ETH) balance from app contract (where tips are held)
     try {
         const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-        console.log(`[buildPayoutPlan] App contract NATIVE balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[buildPayoutPlan] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         if (nativeBalance > 0n) {
             plan.push({ token: 'NATIVE', amount: nativeBalance })
         }
     } catch (error) {
-        console.error('[buildPayoutPlan] Error getting NATIVE balance:', error)
-    }
-
-    // Check for ERC20 tokens that were tipped (from tracked deposits)
-    const trackedTokens = db.getPoolTokens(game.id)
-    for (const token of trackedTokens) {
-        // Skip NATIVE, already handled above
-        if (token === 'NATIVE' || token === zeroAddress || !token || token.length === 0) {
-            continue
-        }
-
-        // Validate token address
-        if (!token.startsWith('0x') || token.length !== 42) {
-            console.warn(`[buildPayoutPlan] Invalid token address: ${token}, skipping`)
-            continue
-        }
-
-        try {
-            const balance = await readContract(bot.viem, {
-                address: token as Address,
-                abi: erc20Abi,
-                functionName: 'balanceOf',
-                args: [bot.appAddress],
-            }) as bigint
-            
-            console.log(`[buildPayoutPlan] ERC20 ${token} balance: ${formatUnits(balance, 18)}`)
-            
-            if (balance > 0n) {
-                plan.push({ token: token as Address, amount: balance })
-            }
-        } catch (error) {
-            console.error(`[buildPayoutPlan] Error getting ERC20 balance for ${token}:`, error)
-            // Continue with other tokens if one fails
-        }
+        console.error('[buildPayoutPlan] Error getting Base ETH balance:', error)
     }
 
     console.log(`[buildPayoutPlan] Final plan:`, plan.map(p => `${formatUnits(p.amount, 18)} ${p.token}`))
@@ -342,25 +269,26 @@ bot.onTip(async (handler, event) => {
     }
 
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
-    db.addDeposit(game.id, event.senderAddress, token, event.amount)
-    console.log(`[onTip] Tip received: ${formatUnits(event.amount, 18)} ${token === 'NATIVE' ? 'ETH' : token} from ${event.senderAddress} for game ${game.id}`)
-    console.log(`[onTip] Bot wallet: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
-    console.log(`[onTip] Currency address: ${event.currency}, Token: ${token}`)
+    
+    // Bot app contract only accepts Base ETH (native), reject ERC20 tokens
+    if (token !== 'NATIVE' && token !== zeroAddress) {
+        console.log(`[onTip] Rejected non-NATIVE tip: ${token} from ${event.senderAddress}`)
+        await handler.sendMessage(
+            event.channelId,
+            `❌ Tip rejected: Bot only accepts Base ETH (native), not ERC20 tokens.\n\n` +
+            `Please tip with Base ETH to play and win! 💰`,
+        )
+        return
+    }
+    
+    db.addDeposit(game.id, event.senderAddress, 'NATIVE', event.amount)
+    console.log(`[onTip] Base ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
+    console.log(`[onTip] App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
     // Immediately check balance after tip to verify it was received
     try {
-        if (token === 'NATIVE') {
-            const balance = await getBalance(bot.viem, { address: bot.appAddress })
-            console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} ETH`)
-        } else {
-            const balance = await readContract(bot.viem, {
-                address: token as Address,
-                abi: erc20Abi,
-                functionName: 'balanceOf',
-                args: [bot.appAddress],
-            }) as bigint
-            console.log(`[onTip] App contract ${token} balance after tip: ${formatUnits(balance, 18)}`)
-        }
+        const balance = await getBalance(bot.viem, { address: bot.appAddress })
+        console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} Base ETH`)
     } catch (error) {
         console.error(`[onTip] Error checking balance after tip:`, error)
     }
@@ -371,11 +299,10 @@ bot.onTip(async (handler, event) => {
     db.addEligiblePlayer(game.id, event.senderAddress) // Wallet address that sent the tip
 
     const formatted = formatUnits(event.amount, 18)
-    const symbol = token === 'NATIVE' ? 'ETH' : token.slice(0, 6) + '...'
 
     await handler.sendMessage(
         event.channelId,
-        `💰 Tip received from <@${event.userId}>! ${formatted} ${symbol} added to Game #${game.gameNumber} prize pool.\n\n` +
+        `💰 Base ETH tip received from <@${event.userId}>! ${formatted} Base ETH added to Game #${game.gameNumber} prize pool.\n\n` +
         `✅ You're now eligible to play and win this round!\n\n${await formatPool(game)}`,
     )
 })
