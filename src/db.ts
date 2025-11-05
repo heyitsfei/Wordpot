@@ -1,5 +1,7 @@
-// In-memory database for games, guesses, pools, deposits, payouts
-// Can be swapped for PostgreSQL in production
+// Persistent database using SQLite with Drizzle ORM
+import { db as drizzleDb } from './db/index'
+import { games, guesses, pools, deposits, payouts, gameNumberCounters, eligiblePlayers } from './db/schema'
+import { eq, and, desc, sql } from 'drizzle-orm'
 
 export type GameState = 'ACTIVE' | 'PAYOUT_PENDING'
 
@@ -58,200 +60,385 @@ export interface LeaderboardEntry {
 }
 
 class Database {
-    private games = new Map<string, Game>()
-    private guesses = new Map<string, Guess>()
-    private pools = new Map<string, Pool>() // key: `${gameId}:${token}`
-    private deposits = new Map<string, Deposit>()
-    private payouts = new Map<string, Payout>()
-    private gameNumberCounter = new Map<string, number>() // key: `${spaceId}:${channelId}`
-    private eligiblePlayers = new Map<string, Set<string>>() // key: gameId, value: Set of userIds who tipped
+    // Helper to convert bigint string to bigint
+    private toBigInt(str: string): bigint {
+        return BigInt(str)
+    }
+
+    // Helper to convert bigint to string for storage
+    private fromBigInt(val: bigint): string {
+        return val.toString()
+    }
 
     // Games
-    createGame(spaceId: string, channelId: string, targetWord: string): Game {
+    async createGame(spaceId: string, channelId: string, targetWord: string): Promise<Game> {
         const key = `${spaceId}:${channelId}`
-        const gameNumber = (this.gameNumberCounter.get(key) || 0) + 1
-        this.gameNumberCounter.set(key, gameNumber)
+        
+        // Get or increment game number counter
+        const [counter] = await drizzleDb
+            .select()
+            .from(gameNumberCounters)
+            .where(eq(gameNumberCounters.key, key))
+            .limit(1)
 
-        const game: Game = {
-            id: `game-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        let gameNumber = 1
+        if (counter) {
+            gameNumber = counter.count + 1
+            await drizzleDb
+                .update(gameNumberCounters)
+                .set({ count: gameNumber })
+                .where(eq(gameNumberCounters.key, key))
+        } else {
+            await drizzleDb.insert(gameNumberCounters).values({ key, count: gameNumber })
+        }
+
+        const gameId = `game-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const now = new Date()
+
+        await drizzleDb.insert(games).values({
+            id: gameId,
             spaceId,
             channelId,
             state: 'ACTIVE',
             targetWord,
-            createdAt: new Date(),
+            createdAt: now,
+            gameNumber,
+        })
+
+        return {
+            id: gameId,
+            spaceId,
+            channelId,
+            state: 'ACTIVE',
+            targetWord,
+            createdAt: now,
             gameNumber,
         }
-
-        this.games.set(game.id, game)
-        return game
     }
 
-    getCurrentGame(spaceId: string, channelId: string): Game | null {
-        for (const game of this.games.values()) {
-            if (game.spaceId === spaceId && game.channelId === channelId && game.state === 'ACTIVE') {
-                return game
-            }
+    async getCurrentGame(spaceId: string, channelId: string): Promise<Game | null> {
+        const [game] = await drizzleDb
+            .select()
+            .from(games)
+            .where(
+                and(
+                    eq(games.spaceId, spaceId),
+                    eq(games.channelId, channelId),
+                    eq(games.state, 'ACTIVE')
+                )
+            )
+            .limit(1)
+
+        if (!game) return null
+
+        return {
+            id: game.id,
+            spaceId: game.spaceId,
+            channelId: game.channelId,
+            state: game.state as GameState,
+            targetWord: game.targetWord,
+            winnerUserId: game.winnerUserId || undefined,
+            createdAt: game.createdAt,
+            wonAt: game.wonAt || undefined,
+            gameNumber: game.gameNumber,
         }
-        return null
     }
 
-    getGame(gameId: string): Game | null {
-        return this.games.get(gameId) || null
+    async getGame(gameId: string): Promise<Game | null> {
+        const [game] = await drizzleDb
+            .select()
+            .from(games)
+            .where(eq(games.id, gameId))
+            .limit(1)
+
+        if (!game) return null
+
+        return {
+            id: game.id,
+            spaceId: game.spaceId,
+            channelId: game.channelId,
+            state: game.state as GameState,
+            targetWord: game.targetWord,
+            winnerUserId: game.winnerUserId || undefined,
+            createdAt: game.createdAt,
+            wonAt: game.wonAt || undefined,
+            gameNumber: game.gameNumber,
+        }
     }
 
     async casToPayoutPending(gameId: string, winnerUserId: string): Promise<boolean> {
-        const game = this.games.get(gameId)
+        const game = await this.getGame(gameId)
         if (!game || game.state !== 'ACTIVE') return false
 
-        game.state = 'PAYOUT_PENDING'
-        game.winnerUserId = winnerUserId
-        game.wonAt = new Date()
+        const now = new Date()
+        await drizzleDb
+            .update(games)
+            .set({
+                state: 'PAYOUT_PENDING',
+                winnerUserId,
+                wonAt: now,
+            })
+            .where(eq(games.id, gameId))
+
         return true
     }
 
-    setGameState(gameId: string, state: GameState): void {
-        const game = this.games.get(gameId)
-        if (game) {
-            game.state = state
-        }
+    async setGameState(gameId: string, state: GameState): Promise<void> {
+        await drizzleDb
+            .update(games)
+            .set({ state })
+            .where(eq(games.id, gameId))
     }
 
     // Guesses
-    addGuess(gameId: string, userId: string, guess: string, feedback: string): Guess {
-        const guessRecord: Guess = {
-            id: `guess-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    async addGuess(gameId: string, userId: string, guess: string, feedback: string): Promise<Guess> {
+        const guessId = `guess-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const now = new Date()
+
+        await drizzleDb.insert(guesses).values({
+            id: guessId,
             gameId,
             userId,
             guess: guess.toLowerCase(),
             feedback,
-            createdAt: new Date(),
+            createdAt: now,
+        })
+
+        return {
+            id: guessId,
+            gameId,
+            userId,
+            guess: guess.toLowerCase(),
+            feedback,
+            createdAt: now,
         }
-
-        this.guesses.set(guessRecord.id, guessRecord)
-        return guessRecord
     }
 
-    getGuesses(gameId: string): Guess[] {
-        return Array.from(this.guesses.values()).filter(g => g.gameId === gameId)
+    async getGuesses(gameId: string): Promise<Guess[]> {
+        const results = await drizzleDb
+            .select()
+            .from(guesses)
+            .where(eq(guesses.gameId, gameId))
+
+        return results.map(g => ({
+            id: g.id,
+            gameId: g.gameId,
+            userId: g.userId,
+            guess: g.guess,
+            feedback: g.feedback,
+            createdAt: g.createdAt,
+        }))
     }
 
-    getUserGuesses(gameId: string, userId: string): Guess[] {
-        return this.getGuesses(gameId).filter(g => g.userId === userId)
+    async getUserGuesses(gameId: string, userId: string): Promise<Guess[]> {
+        const allGuesses = await this.getGuesses(gameId)
+        return allGuesses.filter(g => g.userId === userId)
     }
 
     // Pools
-    getPool(gameId: string, token: string): Pool | null {
-        return this.pools.get(`${gameId}:${token}`) || null
-    }
+    async getPool(gameId: string, token: string): Promise<Pool | null> {
+        const poolId = `${gameId}:${token}`
+        const [pool] = await drizzleDb
+            .select()
+            .from(pools)
+            .where(eq(pools.id, poolId))
+            .limit(1)
 
-    getPoolTokens(gameId: string): string[] {
-        const tokens = new Set<string>()
-        for (const key of this.pools.keys()) {
-            const [gid, token] = key.split(':')
-            if (gid === gameId) {
-                tokens.add(token)
-            }
+        if (!pool) return null
+
+        return {
+            gameId: pool.gameId,
+            token: pool.token,
+            trackedBalance: this.toBigInt(pool.trackedBalance),
+            lastUpdated: pool.lastUpdated,
         }
-        return Array.from(tokens)
     }
 
-    addToPool(gameId: string, token: string, amount: bigint): void {
-        const key = `${gameId}:${token}`
-        const existing = this.pools.get(key)
+    async getPoolTokens(gameId: string): Promise<string[]> {
+        const results = await drizzleDb
+            .select({ token: pools.token })
+            .from(pools)
+            .where(eq(pools.gameId, gameId))
+
+        return results.map(r => r.token)
+    }
+
+    async addToPool(gameId: string, token: string, amount: bigint): Promise<void> {
+        const poolId = `${gameId}:${token}`
+        const existing = await this.getPool(gameId, token)
+
         if (existing) {
-            existing.trackedBalance += amount
-            existing.lastUpdated = new Date()
+            const newBalance = existing.trackedBalance + amount
+            await drizzleDb
+                .update(pools)
+                .set({
+                    trackedBalance: this.fromBigInt(newBalance),
+                    lastUpdated: new Date(),
+                })
+                .where(eq(pools.id, poolId))
         } else {
-            this.pools.set(key, {
+            await drizzleDb.insert(pools).values({
+                id: poolId,
                 gameId,
                 token,
-                trackedBalance: amount,
+                trackedBalance: this.fromBigInt(amount),
                 lastUpdated: new Date(),
             })
         }
     }
 
-    getPoolBalance(gameId: string, token: string): bigint {
-        const pool = this.getPool(gameId, token)
+    async getPoolBalance(gameId: string, token: string): Promise<bigint> {
+        const pool = await this.getPool(gameId, token)
         return pool ? pool.trackedBalance : 0n
     }
 
     // Deposits
-    addDeposit(gameId: string, sender: string, token: string, amount: bigint): Deposit {
-        const deposit: Deposit = {
-            id: `deposit-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    async addDeposit(gameId: string, sender: string, token: string, amount: bigint): Promise<Deposit> {
+        const depositId = `deposit-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const now = new Date()
+
+        await drizzleDb.insert(deposits).values({
+            id: depositId,
+            gameId,
+            sender,
+            token,
+            amount: this.fromBigInt(amount),
+            at: now,
+        })
+
+        // Also add to pool
+        await this.addToPool(gameId, token, amount)
+
+        return {
+            id: depositId,
             gameId,
             sender,
             token,
             amount,
-            at: new Date(),
+            at: now,
         }
-
-        this.deposits.set(deposit.id, deposit)
-        this.addToPool(gameId, token, amount)
-        return deposit
     }
 
-    getDeposits(gameId: string): Deposit[] {
-        return Array.from(this.deposits.values()).filter(d => d.gameId === gameId)
+    async getDeposits(gameId: string): Promise<Deposit[]> {
+        const results = await drizzleDb
+            .select()
+            .from(deposits)
+            .where(eq(deposits.gameId, gameId))
+
+        return results.map(d => ({
+            id: d.id,
+            gameId: d.gameId,
+            sender: d.sender,
+            token: d.token,
+            amount: this.toBigInt(d.amount),
+            at: d.at,
+        }))
     }
 
     // Payouts
-    recordPayout(gameId: string, token: string, amount: bigint, txHash: string, status: 'pending' | 'success' | 'failed' = 'success'): Payout {
-        const payout: Payout = {
-            id: `payout-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    async recordPayout(gameId: string, token: string, amount: bigint, txHash: string, status: 'pending' | 'success' | 'failed' = 'success'): Promise<Payout> {
+        const payoutId = `payout-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const now = new Date()
+
+        await drizzleDb.insert(payouts).values({
+            id: payoutId,
+            gameId,
+            token,
+            amount: this.fromBigInt(amount),
+            txHash,
+            status,
+            createdAt: now,
+        })
+
+        return {
+            id: payoutId,
             gameId,
             token,
             amount,
             txHash,
             status,
-            createdAt: new Date(),
+            createdAt: now,
         }
-
-        this.payouts.set(payout.id, payout)
-        return payout
     }
 
-    getPayouts(gameId: string): Payout[] {
-        return Array.from(this.payouts.values()).filter(p => p.gameId === gameId)
+    async getPayouts(gameId: string): Promise<Payout[]> {
+        const results = await drizzleDb
+            .select()
+            .from(payouts)
+            .where(eq(payouts.gameId, gameId))
+
+        return results.map(p => ({
+            id: p.id,
+            gameId: p.gameId,
+            token: p.token,
+            amount: this.toBigInt(p.amount),
+            txHash: p.txHash,
+            status: p.status as 'pending' | 'success' | 'failed',
+            createdAt: p.createdAt,
+        }))
     }
 
-    // Leaderboard
     // Eligible players (must tip to play)
-    addEligiblePlayer(gameId: string, userId: string): void {
+    async addEligiblePlayer(gameId: string, userId: string): Promise<void> {
         const normalized = userId.toLowerCase()
-        let players = this.eligiblePlayers.get(gameId)
-        if (!players) {
-            players = new Set()
-            this.eligiblePlayers.set(gameId, players)
+        const id = `${gameId}:${normalized}`
+
+        // Check if already exists
+        const [existing] = await drizzleDb
+            .select()
+            .from(eligiblePlayers)
+            .where(eq(eligiblePlayers.id, id))
+            .limit(1)
+
+        if (!existing) {
+            await drizzleDb.insert(eligiblePlayers).values({
+                id,
+                gameId,
+                userId: normalized,
+            })
         }
-        players.add(normalized)
     }
 
-    isEligiblePlayer(gameId: string, userId: string): boolean {
+    async isEligiblePlayer(gameId: string, userId: string): Promise<boolean> {
         const normalized = userId.toLowerCase()
-        
+        const id = `${gameId}:${normalized}`
+
         // Check direct eligibility list
-        const players = this.eligiblePlayers.get(gameId)
-        if (players && players.has(normalized)) {
-            return true
-        }
-        
+        const [player] = await drizzleDb
+            .select()
+            .from(eligiblePlayers)
+            .where(eq(eligiblePlayers.id, id))
+            .limit(1)
+
+        if (player) return true
+
         // Also check if userId matches any deposit sender (handles address format mismatches)
-        const deposits = this.getDeposits(gameId)
+        const deposits = await this.getDeposits(gameId)
         return deposits.some(d => d.sender.toLowerCase() === normalized)
     }
 
-    getEligiblePlayers(gameId: string): string[] {
-        const players = this.eligiblePlayers.get(gameId)
-        return players ? Array.from(players) : []
+    async getEligiblePlayers(gameId: string): Promise<string[]> {
+        const results = await drizzleDb
+            .select({ userId: eligiblePlayers.userId })
+            .from(eligiblePlayers)
+            .where(eq(eligiblePlayers.gameId, gameId))
+
+        return results.map(r => r.userId)
     }
 
-    getLeaderboard(spaceId: string, limit = 10): LeaderboardEntry[] {
-        const entries = new Map<string, LeaderboardEntry>()
+    async getLeaderboard(spaceId: string, limit = 10): Promise<LeaderboardEntry[]> {
+        // Get all games for this space with winners
+        const spaceGames = await drizzleDb
+            .select()
+            .from(games)
+            .where(
+                and(
+                    eq(games.spaceId, spaceId),
+                    sql`${games.winnerUserId} IS NOT NULL`
+                )
+            )
 
-        // Get all games for this space
-        const spaceGames = Array.from(this.games.values()).filter(g => g.spaceId === spaceId && g.winnerUserId)
+        const entries = new Map<string, LeaderboardEntry>()
 
         for (const game of spaceGames) {
             if (!game.winnerUserId) continue
@@ -264,11 +451,15 @@ class Database {
             }
 
             entry.wins++
-            entry.totalGuesses += this.getUserGuesses(game.id, game.winnerUserId).length
+
+            // Get user guesses for this game
+            const userGuesses = await this.getUserGuesses(game.id, game.winnerUserId)
+            entry.totalGuesses += userGuesses.length
 
             // Get total winnings from payouts
-            const payouts = this.getPayouts(game.id).filter(p => p.status === 'success')
-            for (const payout of payouts) {
+            const gamePayouts = await this.getPayouts(game.id)
+            const successfulPayouts = gamePayouts.filter(p => p.status === 'success')
+            for (const payout of successfulPayouts) {
                 entry.totalWinnings += payout.amount
             }
 
@@ -285,4 +476,3 @@ class Database {
 }
 
 export const db = new Database()
-

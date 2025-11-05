@@ -31,3 +31,8 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Database files
+wordpot.db
+wordpot.db-wal
+wordpot.db-shm

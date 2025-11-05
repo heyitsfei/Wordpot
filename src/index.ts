@@ -32,7 +32,7 @@ console.log(`[Bot Init] Created Base Sepolia client for chain ID: ${baseSepolia.
 async function syncWalletBalanceToPool(gameId: string): Promise<void> {
     try {
         // Check if pool already has entries (don't double-count if already synced)
-        const existingTokens = db.getPoolTokens(gameId)
+        const existingTokens = await db.getPoolTokens(gameId)
         if (existingTokens.length > 0) {
             return // Already has pool entries, skip sync
         }
@@ -42,7 +42,7 @@ async function syncWalletBalanceToPool(gameId: string): Promise<void> {
         if (nativeBalance > 0n) {
             // Only add if it's a meaningful amount (more than dust)
             if (nativeBalance > parseUnits('0.0001', 18)) {
-                db.addToPool(gameId, 'NATIVE', nativeBalance)
+                await db.addToPool(gameId, 'NATIVE', nativeBalance)
                 console.log(`Synced ${formatUnits(nativeBalance, 18)} ETH to pool for game ${gameId}`)
             }
         }
@@ -54,12 +54,25 @@ async function syncWalletBalanceToPool(gameId: string): Promise<void> {
 
 // Get or create current game for a channel
 async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game> {
-    let game = db.getCurrentGame(spaceId, channelId)
+    let game = await db.getCurrentGame(spaceId, channelId)
     if (!game) {
+        // Check if there's wallet balance that might indicate an existing game
+        // (This helps detect if bot restarted and lost game state)
+        const balance = await getBalance(baseClient, { address: bot.appAddress })
+        const hasBalance = balance > 0n
+        
+        if (hasBalance) {
+            console.log(`[getOrCreateGame] WARNING: Creating new game but wallet has balance (${formatUnits(balance, 18)} ETH). Bot may have restarted and lost game state.`)
+        }
+        
         const targetWord = getRandomWord()
-        game = db.createGame(spaceId, channelId, targetWord)
+        game = await db.createGame(spaceId, channelId, targetWord)
+        console.log(`[getOrCreateGame] Created new game #${game.gameNumber} with word: ${targetWord} (spaceId: ${spaceId}, channelId: ${channelId})`)
+        
         // Sync on-chain balance to pool on new game creation (recovery after restart)
         await syncWalletBalanceToPool(game.id)
+    } else {
+        console.log(`[getOrCreateGame] Using existing game #${game.gameNumber} (spaceId: ${spaceId}, channelId: ${channelId})`)
     }
     return game
 }
@@ -127,7 +140,7 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
         try {
             const walletBalance = await getBalance(baseClient, { address: bot.appAddress })
             console.error(`[executePayout] No funds in plan. Wallet balance: ${formatUnits(walletBalance, 18)} ETH`)
-            console.error(`[executePayout] Pool tokens:`, db.getPoolTokens(game.id))
+            console.error(`[executePayout] Pool tokens:`, await db.getPoolTokens(game.id))
             throw new Error(`No funds to payout. Wallet has ${formatUnits(walletBalance, 18)} ETH but plan is empty. Check if tips are going to ${bot.appAddress}`)
         } catch (error) {
             throw new Error(`No funds to payout: ${error instanceof Error ? error.message : 'Unknown error'}`)
@@ -174,7 +187,7 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
 
     // Record payouts
     for (const p of plan) {
-        db.recordPayout(game.id, p.token, p.amount, txHash, 'success')
+        await db.recordPayout(game.id, p.token, p.amount, txHash, 'success')
     }
 
     return txHash
@@ -200,7 +213,7 @@ async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ to
 // Start new game
 async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
     const targetWord = getRandomWord()
-    const game = db.createGame(spaceId, channelId, targetWord)
+    const game = await db.createGame(spaceId, channelId, targetWord)
 
     // Pin a message to receive tips
     const pinnedMessage = await bot.sendMessage(
@@ -221,7 +234,7 @@ async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
 
 // Rollover current game's prize pool to a new game and start immediately
 async function rolloverToNewGame(spaceId: string, channelId: string): Promise<{ newGame: Game; rolled: Array<{ token: string; amount: bigint }> }> {
-    const current = db.getCurrentGame(spaceId, channelId)
+    const current = await db.getCurrentGame(spaceId, channelId)
     // Start fresh game first
     const newGame = await startNewGame(spaceId, channelId)
 
@@ -229,14 +242,14 @@ async function rolloverToNewGame(spaceId: string, channelId: string): Promise<{ 
 
     if (current) {
         // Mark current game as ended (reuse PAYOUT_PENDING to prevent further play)
-        db.setGameState(current.id, 'PAYOUT_PENDING')
+        await db.setGameState(current.id, 'PAYOUT_PENDING')
 
         // Move tracked balances to new game (no onchain movement needed)
-        const tokens = db.getPoolTokens(current.id)
+        const tokens = await db.getPoolTokens(current.id)
         for (const token of tokens) {
-            const amount = db.getPoolBalance(current.id, token)
+            const amount = await db.getPoolBalance(current.id, token)
             if (amount > 0n) {
-                db.addToPool(newGame.id, token, amount)
+                await db.addToPool(newGame.id, token, amount)
                 rolled.push({ token, amount })
             }
         }
@@ -331,7 +344,7 @@ bot.onTip(async (handler, event) => {
     const depositToken = 'NATIVE'
     db.addDeposit(game.id, event.senderAddress, depositToken, event.amount)
     console.log(`[onTip] Base Sepolia ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
-    console.log(`[onTip] App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
+    console.log(`[onTip] Game #${game.gameNumber} - App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
     // Immediately check balance after tip to verify it was received
     try {
@@ -360,7 +373,7 @@ bot.onSlashCommand('wordle', async (handler, event) => {
     const game = await getOrCreateGame(event.spaceId, event.channelId)
 
     // Default: show game status and help
-    const eligibleCount = db.getEligiblePlayers(game.id).length
+    const eligibleCount = (await db.getEligiblePlayers(game.id)).length
     const message =
         `🎮 **Wordle Game #${game.gameNumber}**\n\n` +
         `**How to play:**\n` +
@@ -408,7 +421,7 @@ async function processGuess(
     }
 
     // Check if user has tipped to be eligible
-    if (!db.isEligiblePlayer(game.id, userId)) {
+    if (!(await db.isEligiblePlayer(game.id, userId))) {
         await handler.sendMessage(
             channelId,
             `❌ You must tip the bot to play this round and be eligible to win!\n\n` +
@@ -436,9 +449,9 @@ async function processGuess(
     }
 
     const feedback = computeFeedback(cleanGuess, game.targetWord)
-    db.addGuess(game.id, userId, cleanGuess, feedback.emoji)
+    await db.addGuess(game.id, userId, cleanGuess, feedback.emoji)
 
-    const userGuesses = db.getUserGuesses(game.id, userId)
+    const userGuesses = await db.getUserGuesses(game.id, userId)
     const guessNumber = userGuesses.length
 
     if (isCorrect(feedback)) {
@@ -513,7 +526,7 @@ bot.onSlashCommand('pool', async (handler, event) => {
 
 // Slash command: /leaderboard
 bot.onSlashCommand('leaderboard', async (handler, event) => {
-    const entries = db.getLeaderboard(event.spaceId, 10)
+    const entries = await db.getLeaderboard(event.spaceId, 10)
 
     if (entries.length === 0) {
         await handler.sendMessage(event.channelId, '📊 No winners yet. Be the first!')
