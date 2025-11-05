@@ -3,6 +3,8 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { execute } from 'viem/experimental/erc7821'
 import { waitForTransactionReceipt, getBalance, readContract } from 'viem/actions'
+import { createPublicClient, http } from 'viem'
+import { base } from 'viem/chains'
 import { erc20Abi, parseUnits, formatUnits, zeroAddress, Address } from 'viem'
 import commands from './commands'
 import { computeFeedback, isCorrect, isValidWord, getRandomWord, formatFeedback } from './game'
@@ -16,6 +18,15 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
 console.log(`[Bot Init] Bot wallet address (app contract): ${bot.appAddress}`)
 console.log(`[Bot Init] Expected address: 0x714141C5fe42aa97B4f3F684C30Df8330CaDa81B`)
 console.log(`[Bot Init] Address match: ${bot.appAddress.toLowerCase() === '0x714141c5fe42aa97b4f3f684c30df8330cada81b'}`)
+const baseRpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+console.log(`[Bot Init] Base RPC URL: ${baseRpcUrl}`)
+
+// Create dedicated Base mainnet client for balance checks
+const baseClient = createPublicClient({
+    chain: base,
+    transport: http(baseRpcUrl),
+})
+console.log(`[Bot Init] Created Base client for chain ID: ${base.id}`)
 
 // Sync on-chain wallet balance to pool (for recovery after restart)
 async function syncWalletBalanceToPool(gameId: string): Promise<void> {
@@ -27,7 +38,7 @@ async function syncWalletBalanceToPool(gameId: string): Promise<void> {
         }
 
         // Check NATIVE (ETH) balance
-        const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        const nativeBalance = await getBalance(baseClient, { address: bot.appAddress })
         if (nativeBalance > 0n) {
             // Only add if it's a meaningful amount (more than dust)
             if (nativeBalance > parseUnits('0.0001', 18)) {
@@ -60,8 +71,12 @@ async function formatPool(game: Game): Promise<string> {
     // This is where all tips go: bot.appAddress (app contract)
     let nativeBalance = 0n
     try {
-        console.log(`[formatPool] Checking Base ETH balance for app contract: ${bot.appAddress}`)
-        nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        const addressToCheck = bot.appAddress
+        console.log(`[formatPool] Checking Base ETH balance for app contract: ${addressToCheck}`)
+        
+        // Use dedicated Base client to ensure we're querying Base mainnet
+        nativeBalance = await getBalance(baseClient, { address: addressToCheck })
+        console.log(`[formatPool] Raw balance (wei): ${nativeBalance}`)
         console.log(`[formatPool] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         const formatted = formatUnits(nativeBalance, 18)
@@ -86,7 +101,7 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
 
     // Always check NATIVE (Base ETH) balance from app contract (where tips are held)
     try {
-        const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
+        const nativeBalance = await getBalance(baseClient, { address: bot.appAddress })
         console.log(`[buildPayoutPlan] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         if (nativeBalance > 0n) {
@@ -110,7 +125,7 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     if (plan.length === 0) {
         // Check wallet balance one more time for debugging
         try {
-            const walletBalance = await getBalance(bot.viem, { address: bot.appAddress })
+            const walletBalance = await getBalance(baseClient, { address: bot.appAddress })
             console.error(`[executePayout] No funds in plan. Wallet balance: ${formatUnits(walletBalance, 18)} ETH`)
             console.error(`[executePayout] Pool tokens:`, db.getPoolTokens(game.id))
             throw new Error(`No funds to payout. Wallet has ${formatUnits(walletBalance, 18)} ETH but plan is empty. Check if tips are going to ${bot.appAddress}`)
@@ -287,7 +302,7 @@ bot.onTip(async (handler, event) => {
     
     // Immediately check balance after tip to verify it was received
     try {
-        const balance = await getBalance(bot.viem, { address: bot.appAddress })
+        const balance = await getBalance(baseClient, { address: bot.appAddress })
         console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} Base ETH`)
     } catch (error) {
         console.error(`[onTip] Error checking balance after tip:`, error)
