@@ -1,14 +1,15 @@
-// Database connection and setup
-import Database from 'better-sqlite3'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
-import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
+// Database connection and setup using Bun's native SQLite
+// @ts-ignore - Bun's native SQLite types
+import { Database } from 'bun:sqlite'
+import { drizzle } from 'drizzle-orm/bun-sqlite'
+import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import * as schema from './schema'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 
 // Get directory path
-const __dirname = dirname(fileURLToPath(import.meta.url))
+const __dirname: string = dirname(fileURLToPath(import.meta.url))
 
 // Create SQLite database file (in project root)
 const dbPath = join(__dirname, '../../wordpot.db')
