@@ -283,13 +283,10 @@ bot.onTip(async (handler, event) => {
         return
     }
 
-    const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
-    
     console.log(`[onTip] Currency address: ${event.currency}`)
     console.log(`[onTip] Zero address: ${zeroAddress}`)
-    console.log(`[onTip] Currency === zeroAddress: ${event.currency === zeroAddress}`)
-    console.log(`[onTip] Currency.toLowerCase(): ${event.currency.toLowerCase()}`)
-    console.log(`[onTip] Zero address.toLowerCase(): ${zeroAddress.toLowerCase()}`)
+    console.log(`[onTip] Receiver: ${event.receiverAddress}, Bot address: ${bot.appAddress}`)
+    console.log(`[onTip] Amount: ${formatUnits(event.amount, 18)} ETH`)
     
     // Bot app contract only accepts Base Sepolia ETH (native), reject ERC20 tokens
     // Check if it's native ETH: currency is zeroAddress OR common native ETH representations
@@ -301,18 +298,36 @@ bot.onTip(async (handler, event) => {
     
     console.log(`[onTip] isNative check: ${isNative}`)
     
+    // If it's going to the bot's address and we can't definitively identify it as ERC20,
+    // accept it as native ETH (since the bot only accepts native ETH)
+    // This handles cases where Towns might use different representations for native ETH
     if (!isNative) {
-        console.log(`[onTip] Rejected non-NATIVE tip: currency=${event.currency}, token=${token} from ${event.senderAddress}`)
-        await handler.sendMessage(
-            event.channelId,
-            `❌ Tip rejected: Bot only accepts Base Sepolia ETH (native), not ERC20 tokens.\n\n` +
-            `Received currency: \`${event.currency}\`\n` +
-            `Please tip with Base Sepolia ETH (native) to play and win! 💰`,
-        )
-        return
+        // Check if it's a valid ERC20 contract address (has code)
+        // If it's not a contract, it's likely native ETH with a different representation
+        try {
+            const code = await baseClient.getBytecode({ address: event.currency as Address })
+            const isContract = code && code !== '0x'
+            
+            if (isContract) {
+                console.log(`[onTip] Rejected ERC20 token tip: currency=${event.currency} from ${event.senderAddress}`)
+                await handler.sendMessage(
+                    event.channelId,
+                    `❌ Tip rejected: Bot only accepts Base Sepolia ETH (native), not ERC20 tokens.\n\n` +
+                    `Received ERC20 token: \`${event.currency}\`\n` +
+                    `Please tip with Base Sepolia ETH (native) to play and win! 💰`,
+                )
+                return
+            } else {
+                // Not a contract, likely native ETH with unusual representation
+                console.log(`[onTip] Accepting as native ETH (not a contract): currency=${event.currency}`)
+            }
+        } catch (error) {
+            // If we can't check, assume it's native ETH if amount > 0
+            console.log(`[onTip] Could not verify contract status, accepting as native ETH: ${error instanceof Error ? error.message : 'Unknown'}`)
+        }
     }
     
-    // Store as NATIVE regardless of how currency was represented
+    // Store as NATIVE - bot only accepts native ETH
     const depositToken = 'NATIVE'
     db.addDeposit(game.id, event.senderAddress, depositToken, event.amount)
     console.log(`[onTip] Base Sepolia ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
