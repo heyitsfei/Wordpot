@@ -431,7 +431,7 @@ async function processGuess(
     }
 
     if (!isValidWord(cleanGuess)) {
-        await handler.sendMessage(channelId, '❌ Invalid word. Must be exactly 5 letters (a-z only, no spaces or special characters).', threadOpts)
+        await handler.sendMessage(channelId, '❌ Invalid word. Must be a valid 5-letter dictionary word (a-z only, no spaces or special characters).', threadOpts)
         return
     }
 

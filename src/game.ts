@@ -26,6 +26,9 @@ const WORD_LIST = [
     'unify', 'verve', 'wince', 'xylem', 'yacht',
 ]
 
+// Create a Set for O(1) lookup
+const VALID_WORDS = new Set(WORD_LIST.map(word => word.toLowerCase()))
+
 export type Feedback = {
     letters: Array<'green' | 'yellow' | 'gray'>
     emoji: string // 🟩🟨⬜ format
@@ -90,13 +93,12 @@ export function isCorrect(feedback: Feedback): boolean {
 }
 
 /**
- * Check if a word is valid (5 letters, alphabetic only)
- * Note: Any 5-letter word can be guessed, but target words come from WORD_LIST
+ * Check if a word is valid (5 letters, alphabetic only, and exists in dictionary)
  */
 export function isValidWord(word: string): boolean {
     const normalized = word.toLowerCase().trim()
-    // Allow any 5-letter word with only alphabetic characters
-    return normalized.length === 5 && /^[a-z]{5}$/.test(normalized)
+    // Must be exactly 5 letters, alphabetic only, and in the word list
+    return normalized.length === 5 && /^[a-z]{5}$/.test(normalized) && VALID_WORDS.has(normalized)
 }
 
 /**
