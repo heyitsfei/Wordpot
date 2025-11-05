@@ -13,7 +13,9 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
     baseRpcUrl: process.env.BASE_RPC_URL || 'https://mainnet.base.org',
 })
 
-console.log(`[Bot Init] Bot wallet address: ${bot.appAddress}`)
+console.log(`[Bot Init] Bot wallet address (app contract): ${bot.appAddress}`)
+console.log(`[Bot Init] Expected address: 0x714141C5fe42aa97B4f3F684C30Df8330CaDa81B`)
+console.log(`[Bot Init] Address match: ${bot.appAddress.toLowerCase() === '0x714141c5fe42aa97b4f3f684c30df8330cada81b'}`)
 
 // Sync on-chain wallet balance to pool (for recovery after restart)
 async function syncWalletBalanceToPool(gameId: string): Promise<void> {
@@ -55,12 +57,13 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
 async function formatPool(game: Game): Promise<string> {
     const lines: string[] = []
     
-    // Always check actual on-chain NATIVE (ETH) balance
+    // Always check actual on-chain NATIVE (ETH) balance from app contract
+    // This is where all tips go: bot.appAddress (app contract)
     let nativeBalance = 0n
     try {
-        console.log(`[formatPool] Checking balance for bot wallet: ${bot.appAddress}`)
+        console.log(`[formatPool] Checking balance for app contract: ${bot.appAddress}`)
         nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-        console.log(`[formatPool] Wallet balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[formatPool] App contract balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         // Always show balance, even if 0 (so user knows we checked)
         const formatted = formatUnits(nativeBalance, 18)
@@ -105,7 +108,7 @@ async function formatPool(game: Game): Promise<string> {
         return 'No tips received yet. Be the first to tip the bot to add to the prize pool! 💰'
     }
 
-    return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}\n\n_Bot wallet: \`${bot.appAddress}\`_`
+    return `**Prize Pool (Game #${game.gameNumber}):**\n${lines.join('\n')}\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
 }
 
 // Build payout plan - always use on-chain wallet balance (source of truth)
@@ -114,10 +117,10 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
 
     console.log(`[buildPayoutPlan] Game ${game.id}, checking on-chain wallet balance`)
 
-    // Always check NATIVE (ETH) balance from wallet
+    // Always check NATIVE (ETH) balance from app contract (where tips are held)
     try {
         const nativeBalance = await getBalance(bot.viem, { address: bot.appAddress })
-        console.log(`[buildPayoutPlan] NATIVE balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[buildPayoutPlan] App contract NATIVE balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         if (nativeBalance > 0n) {
             plan.push({ token: 'NATIVE', amount: nativeBalance })
@@ -166,7 +169,7 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
 // Execute payout
 async function executePayout(game: Game, winnerUserId: string): Promise<string> {
     console.log(`[executePayout] Starting payout for game ${game.id}, winner: ${winnerUserId}`)
-    console.log(`[executePayout] Bot wallet address: ${bot.appAddress}`)
+    console.log(`[executePayout] App contract address (funds source): ${bot.appAddress}`)
     
     const plan = await buildPayoutPlan(game)
 
