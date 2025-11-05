@@ -479,23 +479,28 @@ bot.onSlashCommand('guess', async (handler, event) => {
     const game = await getOrCreateGame(event.spaceId, event.channelId)
     const guess = (event.args[0] || '').replace(/\s+/g, '').toLowerCase().trim()
     
-    await processGuess(handler, game, event.userId, event.spaceId, event.channelId, guess, event.eventId)
+    // If user is already in a thread, ALWAYS use that existing thread.
+    // Only create a new thread if NOT already in one (when threadId is undefined).
+    const threadId = event.threadId ?? event.eventId
+    
+    await processGuess(handler, game, event.userId, event.spaceId, event.channelId, guess, threadId)
 })
 
 // Handle messages in threads (allow guesses in thread replies)
 bot.onMessage(async (handler, event) => {
-    // Only process if in a thread and message looks like a guess (exactly 5 letters, alphanumeric)
+    // Process guesses in threads - users can continue guessing in the same thread
     if (!event.threadId) {
         return
     }
 
-    // Check if message is a valid 5-letter word
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
     const message = event.message.trim()
     const cleanMessage = message.replace(/\s+/g, '').toLowerCase()
     
-    // Only process if it's exactly 5 characters and looks like a word
+    // Check if message is a valid 5-letter word guess
+    // Users can continue typing guesses in the thread, and bot responds in that thread
     if (cleanMessage.length === 5 && /^[a-z]{5}$/i.test(cleanMessage)) {
-        const game = await getOrCreateGame(event.spaceId, event.channelId)
+        // Respond in the same thread the user is guessing in
         await processGuess(handler, game, event.userId, event.spaceId, event.channelId, cleanMessage, event.threadId)
     }
 })
