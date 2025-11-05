@@ -4,7 +4,7 @@ import { logger } from 'hono/logger'
 import { execute } from 'viem/experimental/erc7821'
 import { waitForTransactionReceipt, getBalance, readContract } from 'viem/actions'
 import { createPublicClient, http } from 'viem'
-import { base } from 'viem/chains'
+import { baseSepolia } from 'viem/chains'
 import { erc20Abi, parseUnits, formatUnits, zeroAddress, Address } from 'viem'
 import commands from './commands'
 import { computeFeedback, isCorrect, isValidWord, getRandomWord, formatFeedback } from './game'
@@ -12,21 +12,21 @@ import { db, type Game } from './db'
 
 const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SECRET!, {
     commands,
-    baseRpcUrl: process.env.BASE_RPC_URL || 'https://mainnet.base.org',
+    baseRpcUrl: process.env.BASE_RPC_URL || 'https://sepolia.base.org',
 })
 
 console.log(`[Bot Init] Bot wallet address (app contract): ${bot.appAddress}`)
 console.log(`[Bot Init] Expected address: 0x714141C5fe42aa97B4f3F684C30Df8330CaDa81B`)
 console.log(`[Bot Init] Address match: ${bot.appAddress.toLowerCase() === '0x714141c5fe42aa97b4f3f684c30df8330cada81b'}`)
-const baseRpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org'
-console.log(`[Bot Init] Base RPC URL: ${baseRpcUrl}`)
+const baseRpcUrl = process.env.BASE_RPC_URL || 'https://sepolia.base.org'
+console.log(`[Bot Init] Base Sepolia RPC URL: ${baseRpcUrl}`)
 
-// Create dedicated Base mainnet client for balance checks
+// Create dedicated Base Sepolia testnet client for balance checks
 const baseClient = createPublicClient({
-    chain: base,
+    chain: baseSepolia,
     transport: http(baseRpcUrl),
 })
-console.log(`[Bot Init] Created Base client for chain ID: ${base.id}`)
+console.log(`[Bot Init] Created Base Sepolia client for chain ID: ${baseSepolia.id}`)
 
 // Sync on-chain wallet balance to pool (for recovery after restart)
 async function syncWalletBalanceToPool(gameId: string): Promise<void> {
@@ -64,27 +64,27 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
     return game
 }
 
-// Format pool display - always shows current on-chain Base ETH balance
-// Bot app contract only accepts Base ETH (native), not ERC20 tokens
+// Format pool display - always shows current on-chain Base Sepolia ETH balance
+// Bot app contract only accepts Base Sepolia ETH (native), not ERC20 tokens
 async function formatPool(game: Game): Promise<string> {
-    // Always check actual on-chain NATIVE (Base ETH) balance from app contract
+    // Always check actual on-chain NATIVE (Base Sepolia ETH) balance from app contract
     // This is where all tips go: bot.appAddress (app contract)
     let nativeBalance = 0n
     try {
         const addressToCheck = bot.appAddress
-        console.log(`[formatPool] Checking Base ETH balance for app contract: ${addressToCheck}`)
+        console.log(`[formatPool] Checking Base Sepolia ETH balance for app contract: ${addressToCheck}`)
         
-        // Use dedicated Base client to ensure we're querying Base mainnet
+        // Use dedicated Base Sepolia client to ensure we're querying Base Sepolia testnet
         nativeBalance = await getBalance(baseClient, { address: addressToCheck })
         console.log(`[formatPool] Raw balance (wei): ${nativeBalance}`)
-        console.log(`[formatPool] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[formatPool] App contract Base Sepolia ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         const formatted = formatUnits(nativeBalance, 18)
         
         if (nativeBalance > 0n) {
-            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} Base ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
+            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} Base Sepolia ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
         } else {
-            return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 Base ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_\n\n💡 Tip the bot with Base ETH to add to the prize pool!`
+            return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 Base Sepolia ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_\n\n💡 Tip the bot with Base Sepolia ETH to add to the prize pool!`
         }
     } catch (error) {
         console.error('[formatPool] Error getting Base ETH balance:', error)
@@ -92,17 +92,17 @@ async function formatPool(game: Game): Promise<string> {
     }
 }
 
-// Build payout plan - always use on-chain Base ETH balance (source of truth)
-// Bot app contract only accepts Base ETH, not ERC20 tokens
+// Build payout plan - always use on-chain Base Sepolia ETH balance (source of truth)
+// Bot app contract only accepts Base Sepolia ETH, not ERC20 tokens
 async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amount: bigint }>> {
     const plan: Array<{ token: string; amount: bigint }> = []
 
-    console.log(`[buildPayoutPlan] Game ${game.id}, checking Base ETH balance from app contract`)
+    console.log(`[buildPayoutPlan] Game ${game.id}, checking Base Sepolia ETH balance from app contract`)
 
-    // Always check NATIVE (Base ETH) balance from app contract (where tips are held)
+    // Always check NATIVE (Base Sepolia ETH) balance from app contract (where tips are held)
     try {
         const nativeBalance = await getBalance(baseClient, { address: bot.appAddress })
-        console.log(`[buildPayoutPlan] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
+        console.log(`[buildPayoutPlan] App contract Base Sepolia ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         if (nativeBalance > 0n) {
             plan.push({ token: 'NATIVE', amount: nativeBalance })
@@ -285,25 +285,25 @@ bot.onTip(async (handler, event) => {
 
     const token = event.currency === zeroAddress ? 'NATIVE' : event.currency
     
-    // Bot app contract only accepts Base ETH (native), reject ERC20 tokens
+    // Bot app contract only accepts Base Sepolia ETH (native), reject ERC20 tokens
     if (token !== 'NATIVE' && token !== zeroAddress) {
         console.log(`[onTip] Rejected non-NATIVE tip: ${token} from ${event.senderAddress}`)
         await handler.sendMessage(
             event.channelId,
-            `❌ Tip rejected: Bot only accepts Base ETH (native), not ERC20 tokens.\n\n` +
-            `Please tip with Base ETH to play and win! 💰`,
+            `❌ Tip rejected: Bot only accepts Base Sepolia ETH (native), not ERC20 tokens.\n\n` +
+            `Please tip with Base Sepolia ETH to play and win! 💰`,
         )
         return
     }
     
     db.addDeposit(game.id, event.senderAddress, 'NATIVE', event.amount)
-    console.log(`[onTip] Base ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
+    console.log(`[onTip] Base Sepolia ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
     console.log(`[onTip] App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
     // Immediately check balance after tip to verify it was received
     try {
         const balance = await getBalance(baseClient, { address: bot.appAddress })
-        console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} Base ETH`)
+        console.log(`[onTip] App contract balance after tip: ${formatUnits(balance, 18)} Base Sepolia ETH`)
     } catch (error) {
         console.error(`[onTip] Error checking balance after tip:`, error)
     }
@@ -317,7 +317,7 @@ bot.onTip(async (handler, event) => {
 
     await handler.sendMessage(
         event.channelId,
-        `💰 Base ETH tip received from <@${event.userId}>! ${formatted} Base ETH added to Game #${game.gameNumber} prize pool.\n\n` +
+        `💰 Base Sepolia ETH tip received from <@${event.userId}>! ${formatted} Base Sepolia ETH added to Game #${game.gameNumber} prize pool.\n\n` +
         `✅ You're now eligible to play and win this round!\n\n${await formatPool(game)}`,
     )
 })
