@@ -79,29 +79,47 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
 
 // Format pool display - always shows current on-chain Base Sepolia ETH balance
 // Bot app contract only accepts Base Sepolia ETH (native), not ERC20 tokens
-async function formatPool(game: Game): Promise<string> {
+async function formatPool(game: Game, retries = 3): Promise<string> {
     // Always check actual on-chain NATIVE (Base Sepolia ETH) balance from app contract
     // This is where all tips go: bot.appAddress (app contract)
+    // Retry logic to handle RPC node delays after transactions
     let nativeBalance = 0n
-    try {
-        const addressToCheck = bot.appAddress
-        console.log(`[formatPool] Checking Base Sepolia ETH balance for app contract: ${addressToCheck}`)
-        
-        // Use dedicated Base Sepolia client to ensure we're querying Base Sepolia testnet
-        nativeBalance = await getBalance(baseClient, { address: addressToCheck })
-        console.log(`[formatPool] Raw balance (wei): ${nativeBalance}`)
-        console.log(`[formatPool] App contract Base Sepolia ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
-        
-        const formatted = formatUnits(nativeBalance, 18)
-        
-        if (nativeBalance > 0n) {
-            return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} Base Sepolia ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_`
-        } else {
-            return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 Base Sepolia ETH\n\n_App contract (where tips go): \`${bot.appAddress}\`_\n\n💡 Tip the bot with Base Sepolia ETH to add to the prize pool!`
+    let lastError: Error | null = null
+    
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const addressToCheck = bot.appAddress
+            console.log(`[formatPool] Checking Base Sepolia ETH balance for app contract: ${addressToCheck} (attempt ${attempt + 1}/${retries})`)
+            
+            // Use dedicated Base Sepolia client to ensure we're querying Base Sepolia testnet
+            nativeBalance = await getBalance(baseClient, { address: addressToCheck })
+            console.log(`[formatPool] Raw balance (wei): ${nativeBalance}`)
+            console.log(`[formatPool] App contract Base Sepolia ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
+            
+            // If we got a result, use it
+            break
+        } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error))
+            console.warn(`[formatPool] Attempt ${attempt + 1} failed:`, lastError.message)
+            
+            // Wait before retrying (RPC node might be updating)
+            if (attempt < retries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)))
+            }
         }
-    } catch (error) {
-        console.error('[formatPool] Error getting Base ETH balance:', error)
-        return `**Prize Pool (Game #${game.gameNumber}):**\n• Error checking balance: ${error instanceof Error ? error.message : 'Unknown error'}\n\n_App contract: \`${bot.appAddress}\`_`
+    }
+    
+    if (lastError && nativeBalance === 0n) {
+        console.error('[formatPool] Error getting Base ETH balance after retries:', lastError)
+        return `**Prize Pool (Game #${game.gameNumber}):**\n• Error checking balance: ${lastError.message}`
+    }
+    
+    const formatted = formatUnits(nativeBalance, 18)
+    
+    if (nativeBalance > 0n) {
+        return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} Base Sepolia ETH`
+    } else {
+        return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 Base Sepolia ETH\n\n💡 Tip the bot with Base Sepolia ETH to add to the prize pool!`
     }
 }
 
@@ -185,12 +203,37 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
 
     await waitForTransactionReceipt(bot.viem, { hash: txHash })
 
+    // Small delay to ensure balance updates are propagated in RPC node
+    // Some RPC nodes may have slight delay in reflecting balance changes
+    await new Promise(resolve => setTimeout(resolve, 1000))
+
     // Record payouts
     for (const p of plan) {
         await db.recordPayout(game.id, p.token, p.amount, txHash, 'success')
     }
 
     return txHash
+}
+
+// Fetch word definition from free dictionary API
+async function getWordDefinition(word: string): Promise<string | null> {
+    try {
+        const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`)
+        if (!response.ok) {
+            return null
+        }
+        const data = await response.json()
+        if (Array.isArray(data) && data.length > 0) {
+            const firstMeaning = data[0].meanings?.[0]
+            if (firstMeaning?.definitions?.[0]?.definition) {
+                return firstMeaning.definitions[0].definition
+            }
+        }
+        return null
+    } catch (error) {
+        console.error(`[getWordDefinition] Error fetching definition for ${word}:`, error)
+        return null
+    }
 }
 
 // Announce winner
@@ -202,9 +245,13 @@ async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ to
         return `${formatted} ${symbol}`
     }).join(', ')
 
+    // Fetch word definition
+    const definition = await getWordDefinition(game.targetWord)
+    const definitionText = definition ? `\n\n**Definition:** ${definition}` : ''
+
     await bot.sendMessage(
         game.channelId,
-        `🎉 **WINNER!** 🎉\n\n${winnerDisplay} guessed the word **${game.targetWord.toUpperCase()}** correctly!\n\n` +
+        `🎉 **WINNER!** 🎉\n\n${winnerDisplay} guessed the word **${game.targetWord.toUpperCase()}** correctly!${definitionText}\n\n` +
         `**Prize:** ${winnings}\n` +
         `**Transaction:** \`${txHash}\``,
     )
