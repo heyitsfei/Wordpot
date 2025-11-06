@@ -61,16 +61,29 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
         const balance = await getBalance(baseClient, { address: bot.appAddress })
         const hasBalance = balance > 0n
         
-        if (hasBalance) {
-            console.log(`[getOrCreateGame] WARNING: Creating new game but wallet has balance (${formatUnits(balance, 18)} ETH). Bot may have restarted and lost game state.`)
-        }
-        
         const targetWord = getRandomWord()
         game = await db.createGame(spaceId, channelId, targetWord)
         console.log(`[getOrCreateGame] Created new game #${game.gameNumber} with word: ${targetWord} (spaceId: ${spaceId}, channelId: ${channelId})`)
         
         // Sync on-chain balance to pool on new game creation (recovery after restart)
         await syncWalletBalanceToPool(game.id)
+        
+        // If there was a balance, the bot likely restarted - notify users
+        if (hasBalance) {
+            console.log(`[getOrCreateGame] WARNING: Creating new game but wallet has balance (${formatUnits(balance, 18)} ETH). Bot may have restarted and lost game state.`)
+            try {
+                await bot.sendMessage(
+                    channelId,
+                    `⚠️ **Bot Restart Detected**\n\n` +
+                    `The bot has restarted and started a new game. The previous game state was lost, but all funds are safe and have been added to Game #${game.gameNumber}.\n\n` +
+                    `💰 Prize Pool (Game #${game.gameNumber}): ${formatUnits(balance, 18)} ETH\n\n` +
+                    `You can continue playing by tipping the bot to become eligible!`
+                )
+            } catch (error) {
+                console.error(`[getOrCreateGame] Failed to send restart notification:`, error)
+                // Don't throw - continue even if message fails
+            }
+        }
     } else {
         console.log(`[getOrCreateGame] Using existing game #${game.gameNumber} (spaceId: ${spaceId}, channelId: ${channelId})`)
     }
@@ -168,7 +181,14 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
         throw new Error(`No smart account found for user ${winnerUserId}. User may not have deployed a smart account yet.`)
     }
     
-    console.log(`[executePayout] Winner's smart account address: ${winnerSmartAccountAddress}`)
+    // Verify we got a different address (smart account vs root address)
+    if (winnerSmartAccountAddress.toLowerCase() === winnerUserId.toLowerCase()) {
+        console.warn(`[executePayout] WARNING: Smart account address matches root address. This may indicate the user hasn't deployed a smart account yet.`)
+    }
+    
+    console.log(`[executePayout] Winner's root address (userId): ${winnerUserId}`)
+    console.log(`[executePayout] Winner's smart account address (payout destination): ${winnerSmartAccountAddress}`)
+    console.log(`[executePayout] Addresses match: ${winnerSmartAccountAddress.toLowerCase() === winnerUserId.toLowerCase()}`)
     
     const plan = await buildPayoutPlan(game)
 
@@ -264,6 +284,20 @@ async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ to
         return `${formatted} ${symbol}`
     }).join(', ')
 
+    // Get winner's smart account address for transparency
+    let smartAccountInfo = ''
+    try {
+        const winnerSmartAccountAddress = await getSmartAccountFromUserId(bot, {
+            userId: winnerUserId as Address,
+        })
+        if (winnerSmartAccountAddress && winnerSmartAccountAddress.toLowerCase() !== winnerUserId.toLowerCase()) {
+            smartAccountInfo = `\n**Payout Address:** \`${winnerSmartAccountAddress}\` (smart account)`
+        }
+    } catch (error) {
+        console.error(`[announceWinner] Error getting smart account address:`, error)
+        // Don't fail the announcement if we can't get the address
+    }
+
     // Fetch word definition
     const definition = await getWordDefinition(game.targetWord)
     const definitionText = definition ? `\n\n**Definition:** ${definition}` : ''
@@ -271,7 +305,7 @@ async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ to
     await bot.sendMessage(
         game.channelId,
         `🎉 **WINNER!** 🎉\n\n${winnerDisplay} guessed the word **${game.targetWord.toUpperCase()}** correctly!${definitionText}\n\n` +
-        `**Prize:** ${winnings}\n` +
+        `**Prize:** ${winnings}${smartAccountInfo}\n` +
         `**Transaction:** \`${txHash}\``,
     )
 }
