@@ -144,6 +144,25 @@ class Database {
         }
     }
 
+    async getAllActiveGames(): Promise<Game[]> {
+        const results = await drizzleDb
+            .select()
+            .from(games)
+            .where(eq(games.state, 'ACTIVE'))
+
+        return results.map(game => ({
+            id: game.id,
+            spaceId: game.spaceId,
+            channelId: game.channelId,
+            state: game.state as GameState,
+            targetWord: game.targetWord,
+            winnerUserId: game.winnerUserId || undefined,
+            createdAt: game.createdAt,
+            wonAt: game.wonAt || undefined,
+            gameNumber: game.gameNumber,
+        }))
+    }
+
     async getGame(gameId: string): Promise<Game | null> {
         const [game] = await drizzleDb
             .select()

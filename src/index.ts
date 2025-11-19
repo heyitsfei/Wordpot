@@ -56,8 +56,11 @@ async function syncWalletBalanceToPool(gameId: string): Promise<void> {
 async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game> {
     let game = await db.getCurrentGame(spaceId, channelId)
     if (!game) {
-        // Check if there's wallet balance that might indicate an existing game
-        // (This helps detect if bot restarted and lost game state)
+        // No active game found in database - check if there's wallet balance
+        // This could mean:
+        // 1. First game ever (no balance) - create new game normally
+        // 2. Previous game was completed (balance exists but game was won/lost) - create new game and sync balance
+        // 3. Database was lost but funds remain on-chain (rare) - create new game and sync balance
         const balance = await getBalance(baseClient, { address: bot.appAddress })
         const hasBalance = balance > 0n
         
@@ -65,27 +68,29 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
         game = await db.createGame(spaceId, channelId, targetWord)
         console.log(`[getOrCreateGame] Created new game #${game.gameNumber} with word: ${targetWord} (spaceId: ${spaceId}, channelId: ${channelId})`)
         
-        // Sync on-chain balance to pool on new game creation (recovery after restart)
+        // Sync on-chain balance to pool on new game creation (recovery after restart or rollover)
         await syncWalletBalanceToPool(game.id)
         
-        // If there was a balance, the bot likely restarted - notify users
+        // If there was a balance but no active game, notify users
+        // This means either the previous game completed or the database was lost
         if (hasBalance) {
-            console.log(`[getOrCreateGame] WARNING: Creating new game but wallet has balance (${formatUnits(balance, 18)} ETH). Bot may have restarted and lost game state.`)
+            console.log(`[getOrCreateGame] Creating new game with existing balance (${formatUnits(balance, 18)} ETH). Previous game may have completed or database was reset.`)
             try {
                 await bot.sendMessage(
                     channelId,
-                    `⚠️ **Bot Restart Detected**\n\n` +
-                    `The bot has restarted and started a new game. The previous game state was lost, but all funds are safe and have been added to Game #${game.gameNumber}.\n\n` +
+                    `🔄 **New Game Started**\n\n` +
+                    `Game #${game.gameNumber} has started! Any funds from the previous game have been rolled into this prize pool.\n\n` +
                     `💰 Prize Pool (Game #${game.gameNumber}): ${formatUnits(balance, 18)} ETH\n\n` +
-                    `You can continue playing by tipping the bot to become eligible!`
+                    `Tip the bot to become eligible to play and win!`
                 )
             } catch (error) {
-                console.error(`[getOrCreateGame] Failed to send restart notification:`, error)
+                console.error(`[getOrCreateGame] Failed to send new game notification:`, error)
                 // Don't throw - continue even if message fails
             }
         }
     } else {
-        console.log(`[getOrCreateGame] Using existing game #${game.gameNumber} (spaceId: ${spaceId}, channelId: ${channelId})`)
+        // Active game found in database - successfully loaded from persistent storage
+        console.log(`[getOrCreateGame] Loaded existing active game #${game.gameNumber} from persistent storage (spaceId: ${spaceId}, channelId: ${channelId})`)
     }
     return game
 }
@@ -670,6 +675,26 @@ bot.onSlashCommand('config', async (handler, event) => {
         )
     }
 })
+
+// Load and log all active games on startup
+async function loadActiveGamesOnStartup() {
+    try {
+        const activeGames = await db.getAllActiveGames()
+        if (activeGames.length > 0) {
+            console.log(`[Startup] Loaded ${activeGames.length} active game(s) from persistent storage:`)
+            for (const game of activeGames) {
+                console.log(`[Startup]   - Game #${game.gameNumber} (${game.spaceId}:${game.channelId}) - Target word: ${game.targetWord}`)
+            }
+        } else {
+            console.log(`[Startup] No active games found in database. Bot is ready for new games.`)
+        }
+    } catch (error) {
+        console.error(`[Startup] Error loading active games:`, error)
+    }
+}
+
+// Load active games on startup
+await loadActiveGamesOnStartup()
 
 const { jwtMiddleware, handler } = bot.start()
 
