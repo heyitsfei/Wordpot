@@ -16,8 +16,8 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
 })
 
 console.log(`[Bot Init] Bot wallet address (app contract): ${bot.appAddress}`)
-console.log(`[Bot Init] Expected address: 0x714141C5fe42aa97B4f3F684C30Df8330CaDa81B`)
-console.log(`[Bot Init] Address match: ${bot.appAddress.toLowerCase() === '0x714141c5fe42aa97b4f3f684c30df8330cada81b'}`)
+console.log(`[Bot Init] Expected address: 0xE48eB33Ba26b623675F0DebCD245AD183c9ad026`)
+console.log(`[Bot Init] Address match: ${bot.appAddress.toLowerCase() === '0xe48eb33ba26b623675f0debcd245ad183c9ad026'}`)
 const baseRpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org'
 console.log(`[Bot Init] Base Mainnet RPC URL: ${baseRpcUrl}`)
 
