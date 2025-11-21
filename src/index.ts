@@ -500,7 +500,8 @@ bot.onTip(async (handler, event) => {
     await handler.sendMessage(
         event.channelId,
         `💰 Base ETH tip received from <@${event.userId}>! ${formatted} ETH added to Game #${game.gameNumber} prize pool.\n\n` +
-        `✅ You're now eligible to play and win this round!\n\n${await formatPool(game)}`,
+        `✅ You're now eligible to play and win this round!\n\n` +
+        `🎮 **How to play:** Use \`/guess <word>\` to start guessing the 5-letter word!\n\n${await formatPool(game)}`,
     )
 })
 
