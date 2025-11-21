@@ -143,8 +143,13 @@ async function formatPool(game: Game, retries = 3): Promise<string> {
 
 // Build payout plan - always use on-chain Base ETH balance (source of truth)
 // Bot app contract only accepts Base ETH, not ERC20 tokens
-async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amount: bigint }>> {
+// Returns both winner amount (95%) and fee amount (5%)
+async function buildPayoutPlan(game: Game): Promise<{
+    plan: Array<{ token: string; amount: bigint }>,
+    feePlan: Array<{ token: string; amount: bigint }>
+}> {
     const plan: Array<{ token: string; amount: bigint }> = []
+    const feePlan: Array<{ token: string; amount: bigint }> = []
 
     console.log(`[buildPayoutPlan] Game ${game.id}, checking Base ETH balance from app contract`)
     
@@ -154,14 +159,26 @@ async function buildPayoutPlan(game: Game): Promise<Array<{ token: string; amoun
         console.log(`[buildPayoutPlan] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
         
         if (nativeBalance > 0n) {
-            plan.push({ token: 'NATIVE', amount: nativeBalance })
+            // Calculate 5% fee (using integer math to avoid precision issues)
+            // fee = balance * 5 / 100
+            // winnerAmount = balance - fee
+            const fee = (nativeBalance * 5n) / 100n
+            const winnerAmount = nativeBalance - fee
+            
+            plan.push({ token: 'NATIVE', amount: winnerAmount })
+            feePlan.push({ token: 'NATIVE', amount: fee })
+            
+            console.log(`[buildPayoutPlan] Total balance: ${formatUnits(nativeBalance, 18)} ETH`)
+            console.log(`[buildPayoutPlan] Fee (5%): ${formatUnits(fee, 18)} ETH`)
+            console.log(`[buildPayoutPlan] Winner amount (95%): ${formatUnits(winnerAmount, 18)} ETH`)
         }
     } catch (error) {
         console.error('[buildPayoutPlan] Error getting Base ETH balance:', error)
     }
 
     console.log(`[buildPayoutPlan] Final plan:`, plan.map(p => `${formatUnits(p.amount, 18)} ${p.token}`))
-    return plan
+    console.log(`[buildPayoutPlan] Fee plan:`, feePlan.map(p => `${formatUnits(p.amount, 18)} ${p.token}`))
+    return { plan, feePlan }
 }
 
 // Execute payout
@@ -195,7 +212,7 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     console.log(`[executePayout] Winner's smart account address (payout destination): ${winnerSmartAccountAddress}`)
     console.log(`[executePayout] Addresses match: ${winnerSmartAccountAddress.toLowerCase() === winnerUserId.toLowerCase()}`)
     
-    const plan = await buildPayoutPlan(game)
+    const { plan, feePlan } = await buildPayoutPlan(game)
 
     if (plan.length === 0) {
         // Check wallet balance one more time for debugging
@@ -210,32 +227,33 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     }
     
     console.log(`[executePayout] Sending payout to winner's smart account: ${winnerSmartAccountAddress}`)
+    console.log(`[executePayout] Fee (5%) will remain in bot's app address: ${bot.appAddress}`)
 
-    const calls = plan.map(p => {
-        // Handle NATIVE (ETH) or zeroAddress
+    // Build calls: only send winner amount (95%), fee (5%) stays in bot's app address
+    const calls: Array<any> = []
+    
+    // Send winner amount (95%) only - fee stays in bot's app address
+    for (const p of plan) {
         if (p.token === 'NATIVE' || p.token === zeroAddress || !p.token || p.token.length === 0) {
-            // Send native ETH directly to winner's smart account address
-            return {
+            calls.push({
                 to: winnerSmartAccountAddress,
                 data: '0x' as const,
                 value: p.amount,
-            }
+            })
         } else {
-            // Validate ERC20 token address
             if (!p.token.startsWith('0x') || p.token.length !== 42) {
                 throw new Error(`Invalid token address: ${p.token}`)
             }
-            // Transfer ERC20 token to winner's smart account address
-            return {
+            calls.push({
                 to: p.token as Address,
                 abi: erc20Abi,
                 functionName: 'transfer' as const,
                 args: [winnerSmartAccountAddress, p.amount],
-            }
+            })
         }
-    })
+    }
     
-    console.log(`[executePayout] Executing payout transaction with ${calls.length} call(s) to winner's smart account: ${winnerSmartAccountAddress}`)
+    console.log(`[executePayout] Executing payout transaction: sending ${plan.length} token(s) to winner (95%), fee (5%) remains in bot`)
 
     const txHash = await execute(bot.viem, {
         address: bot.appAddress,
@@ -251,9 +269,14 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     // Some RPC nodes may have slight delay in reflecting balance changes
     await new Promise(resolve => setTimeout(resolve, 1000))
 
-    // Record payouts
+    // Record payouts (winner amount only, fee is kept in bot's address)
     for (const p of plan) {
         await db.recordPayout(game.id, p.token, p.amount, txHash, 'success')
+    }
+    
+    // Log fee collection
+    for (const p of feePlan) {
+        console.log(`[executePayout] Collected fee: ${formatUnits(p.amount, 18)} ${p.token === 'NATIVE' ? 'ETH' : p.token}`)
     }
 
     return txHash
@@ -281,9 +304,15 @@ async function getWordDefinition(word: string): Promise<string | null> {
 }
 
 // Announce winner
-async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ token: string; amount: bigint }>, txHash: string): Promise<void> {
+async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ token: string; amount: bigint }>, feePlan: Array<{ token: string; amount: bigint }>, txHash: string): Promise<void> {
     const winnerDisplay = `<@${winnerUserId}>`
     const winnings = plan.map(p => {
+        const formatted = formatUnits(p.amount, 18)
+        const symbol = p.token === 'NATIVE' ? 'ETH' : p.token.slice(0, 6) + '...'
+        return `${formatted} ${symbol}`
+    }).join(', ')
+    
+    const fees = feePlan.map(p => {
         const formatted = formatUnits(p.amount, 18)
         const symbol = p.token === 'NATIVE' ? 'ETH' : p.token.slice(0, 6) + '...'
         return `${formatted} ${symbol}`
@@ -307,10 +336,12 @@ async function announceWinner(game: Game, winnerUserId: string, plan: Array<{ to
     const definition = await getWordDefinition(game.targetWord)
     const definitionText = definition ? `\n\n**Definition:** ${definition}` : ''
 
+    const feeText = fees ? `\n**Fee (5%):** ${fees}` : ''
+    
     await bot.sendMessage(
         game.channelId,
         `🎉 **WINNER!** 🎉\n\n${winnerDisplay} guessed the word **${game.targetWord.toUpperCase()}** correctly!${definitionText}\n\n` +
-        `**Prize:** ${winnings}${smartAccountInfo}\n` +
+        `**Prize:** ${winnings}${feeText}${smartAccountInfo}\n` +
         `**Transaction:** \`${txHash}\``,
     )
 }
@@ -572,7 +603,8 @@ async function processGuess(
 
         try {
             const txHash = await executePayout(game, userId)
-            await announceWinner(game, userId, await buildPayoutPlan(game), txHash)
+            const { plan, feePlan } = await buildPayoutPlan(game)
+            await announceWinner(game, userId, plan, feePlan, txHash)
             await startNewGame(spaceId, channelId)
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : 'Unknown error'
