@@ -28,27 +28,75 @@ const baseClient = createPublicClient({
 })
 console.log(`[Bot Init] Created Base Mainnet client for chain ID: ${base.id}`)
 
-// Sync on-chain wallet balance to pool (for recovery after restart)
-async function syncWalletBalanceToPool(gameId: string): Promise<void> {
+// Return funds to depositors when a game is restarted
+async function returnFundsToDepositors(game: Game): Promise<void> {
     try {
-        // Check if pool already has entries (don't double-count if already synced)
-        const existingTokens = await db.getPoolTokens(gameId)
-        if (existingTokens.length > 0) {
-            return // Already has pool entries, skip sync
+        const deposits = await db.getDeposits(game.id)
+        if (deposits.length === 0) {
+            console.log(`[returnFundsToDepositors] No deposits to return for game ${game.id}`)
+            return
         }
 
-        // Check NATIVE (ETH) balance
-        const nativeBalance = await getBalance(baseClient, { address: bot.appAddress })
-        if (nativeBalance > 0n) {
-            // Only add if it's a meaningful amount (more than dust)
-            if (nativeBalance > parseUnits('0.0001', 18)) {
-                await db.addToPool(gameId, 'NATIVE', nativeBalance)
-                console.log(`Synced ${formatUnits(nativeBalance, 18)} ETH to pool for game ${gameId}`)
+        console.log(`[returnFundsToDepositors] Returning funds to ${deposits.length} depositor(s) for game ${game.id}`)
+
+        // Group deposits by sender and token
+        const refunds = new Map<string, Map<string, bigint>>() // sender -> token -> total amount
+
+        for (const deposit of deposits) {
+            if (!refunds.has(deposit.sender)) {
+                refunds.set(deposit.sender, new Map())
+            }
+            const senderRefunds = refunds.get(deposit.sender)!
+            const current = senderRefunds.get(deposit.token) || 0n
+            senderRefunds.set(deposit.token, current + deposit.amount)
+        }
+
+        // Build refund calls
+        const calls: Array<any> = []
+        for (const [sender, tokenAmounts] of refunds) {
+            for (const [token, amount] of tokenAmounts) {
+                if (token === 'NATIVE') {
+                    calls.push({
+                        to: sender as Address,
+                        data: '0x' as const,
+                        value: amount,
+                    })
+                } else {
+                    calls.push({
+                        to: token as Address,
+                        abi: erc20Abi,
+                        functionName: 'transfer' as const,
+                        args: [sender as Address, amount],
+                    })
+                }
+            }
+        }
+
+        if (calls.length === 0) {
+            console.log(`[returnFundsToDepositors] No refunds to process`)
+            return
+        }
+
+        console.log(`[returnFundsToDepositors] Executing ${calls.length} refund transaction(s)`)
+
+        const txHash = await execute(bot.viem, {
+            address: bot.appAddress,
+            account: bot.viem.account,
+            calls,
+        })
+
+        await waitForTransactionReceipt(bot.viem, { hash: txHash })
+        console.log(`[returnFundsToDepositors] Refund transaction confirmed: ${txHash}`)
+
+        // Record refunds as payouts
+        for (const [sender, tokenAmounts] of refunds) {
+            for (const [token, amount] of tokenAmounts) {
+                await db.recordPayout(game.id, token, amount, txHash, 'success')
             }
         }
     } catch (error) {
-        console.error('Error syncing wallet balance to pool:', error)
-        // Don't throw - continue even if sync fails
+        console.error(`[returnFundsToDepositors] Error returning funds:`, error)
+        throw error
     }
 }
 
@@ -56,38 +104,10 @@ async function syncWalletBalanceToPool(gameId: string): Promise<void> {
 async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game> {
     let game = await db.getCurrentGame(spaceId, channelId)
     if (!game) {
-        // No active game found in database - check if there's wallet balance
-        // This could mean:
-        // 1. First game ever (no balance) - create new game normally
-        // 2. Previous game was completed (balance exists but game was won/lost) - create new game and sync balance
-        // 3. Database was lost but funds remain on-chain (rare) - create new game and sync balance
-        const balance = await getBalance(baseClient, { address: bot.appAddress })
-        const hasBalance = balance > 0n
-        
+        // No active game found - create a new one
         const targetWord = getRandomWord()
         game = await db.createGame(spaceId, channelId, targetWord)
         console.log(`[getOrCreateGame] Created new game #${game.gameNumber} with word: ${targetWord} (spaceId: ${spaceId}, channelId: ${channelId})`)
-        
-        // Sync on-chain balance to pool on new game creation (recovery after restart or rollover)
-        await syncWalletBalanceToPool(game.id)
-        
-        // If there was a balance but no active game, notify users
-        // This means either the previous game completed or the database was lost
-        if (hasBalance) {
-            console.log(`[getOrCreateGame] Creating new game with existing balance (${formatUnits(balance, 18)} ETH). Previous game may have completed or database was reset.`)
-            try {
-                await bot.sendMessage(
-                    channelId,
-                    `🔄 **New Game Started**\n\n` +
-                    `Game #${game.gameNumber} has started! Any funds from the previous game have been rolled into this prize pool.\n\n` +
-                    `💰 Prize Pool (Game #${game.gameNumber}): ${formatUnits(balance, 18)} ETH\n\n` +
-                    `Tip the bot to become eligible to play and win!`
-                )
-            } catch (error) {
-                console.error(`[getOrCreateGame] Failed to send new game notification:`, error)
-                // Don't throw - continue even if message fails
-            }
-        }
     } else {
         // Active game found in database - successfully loaded from persistent storage
         console.log(`[getOrCreateGame] Loaded existing active game #${game.gameNumber} from persistent storage (spaceId: ${spaceId}, channelId: ${channelId})`)
@@ -95,54 +115,22 @@ async function getOrCreateGame(spaceId: string, channelId: string): Promise<Game
     return game
 }
 
-// Format pool display - always shows current on-chain Base ETH balance
-// Bot app contract only accepts Base ETH (native), not ERC20 tokens
-async function formatPool(game: Game, retries = 3): Promise<string> {
-    // Always check actual on-chain NATIVE (Base ETH) balance from app contract
-    // This is where all tips go: bot.appAddress (app contract)
-    // Retry logic to handle RPC node delays after transactions
-    let nativeBalance = 0n
-    let lastError: Error | null = null
+// Format pool display - shows tracked deposits for this specific game
+// Each game tracks its own deposits separately (not the total wallet balance)
+async function formatPool(game: Game): Promise<string> {
+    // Get tracked pool balance for this specific game (not total wallet balance)
+    const poolBalance = await db.getPoolBalance(game.id, 'NATIVE')
+    const formatted = formatUnits(poolBalance, 18)
     
-    for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-            const addressToCheck = bot.appAddress
-            console.log(`[formatPool] Checking Base ETH balance for app contract: ${addressToCheck} (attempt ${attempt + 1}/${retries})`)
-            
-            // Use dedicated Base Mainnet client to ensure we're querying Base Mainnet
-            nativeBalance = await getBalance(baseClient, { address: addressToCheck })
-            console.log(`[formatPool] Raw balance (wei): ${nativeBalance}`)
-            console.log(`[formatPool] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
-            
-            // If we got a result, use it
-            break
-        } catch (error) {
-            lastError = error instanceof Error ? error : new Error(String(error))
-            console.warn(`[formatPool] Attempt ${attempt + 1} failed:`, lastError.message)
-            
-            // Wait before retrying (RPC node might be updating)
-            if (attempt < retries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)))
-            }
-        }
-    }
-    
-    if (lastError && nativeBalance === 0n) {
-        console.error('[formatPool] Error getting Base ETH balance after retries:', lastError)
-        return `**Prize Pool (Game #${game.gameNumber}):**\n• Error checking balance: ${lastError.message}`
-    }
-    
-    const formatted = formatUnits(nativeBalance, 18)
-    
-    if (nativeBalance > 0n) {
+    if (poolBalance > 0n) {
         return `**Prize Pool (Game #${game.gameNumber}):**\n• ${formatted} ETH`
     } else {
         return `**Prize Pool (Game #${game.gameNumber}):**\n• 0 ETH\n\n💡 Tip the bot with Base ETH to add to the prize pool!`
     }
 }
 
-// Build payout plan - always use on-chain Base ETH balance (source of truth)
-// Bot app contract only accepts Base ETH, not ERC20 tokens
+// Build payout plan - uses tracked pool balance for this specific game
+// Each game only pays out from its own deposits, not the total wallet balance
 // Returns both winner amount (95%) and fee amount (5%)
 async function buildPayoutPlan(game: Game): Promise<{
     plan: Array<{ token: string; amount: bigint }>,
@@ -151,29 +139,27 @@ async function buildPayoutPlan(game: Game): Promise<{
     const plan: Array<{ token: string; amount: bigint }> = []
     const feePlan: Array<{ token: string; amount: bigint }> = []
 
-    console.log(`[buildPayoutPlan] Game ${game.id}, checking Base ETH balance from app contract`)
+    console.log(`[buildPayoutPlan] Game ${game.id}, checking tracked pool balance`)
     
-    // Always check NATIVE (Base ETH) balance from app contract (where tips are held)
-    try {
-        const nativeBalance = await getBalance(baseClient, { address: bot.appAddress })
-        console.log(`[buildPayoutPlan] App contract Base ETH balance: ${formatUnits(nativeBalance, 18)} ETH`)
+    // Get tracked pool balance for this specific game (not total wallet balance)
+    const poolBalance = await db.getPoolBalance(game.id, 'NATIVE')
+    console.log(`[buildPayoutPlan] Tracked pool balance for game ${game.id}: ${formatUnits(poolBalance, 18)} ETH`)
+    
+    if (poolBalance > 0n) {
+        // Calculate 5% fee (using integer math to avoid precision issues)
+        // fee = balance * 5 / 100
+        // winnerAmount = balance - fee
+        const fee = (poolBalance * 5n) / 100n
+        const winnerAmount = poolBalance - fee
         
-        if (nativeBalance > 0n) {
-            // Calculate 5% fee (using integer math to avoid precision issues)
-            // fee = balance * 5 / 100
-            // winnerAmount = balance - fee
-            const fee = (nativeBalance * 5n) / 100n
-            const winnerAmount = nativeBalance - fee
-            
-            plan.push({ token: 'NATIVE', amount: winnerAmount })
-            feePlan.push({ token: 'NATIVE', amount: fee })
-            
-            console.log(`[buildPayoutPlan] Total balance: ${formatUnits(nativeBalance, 18)} ETH`)
-            console.log(`[buildPayoutPlan] Fee (5%): ${formatUnits(fee, 18)} ETH`)
-            console.log(`[buildPayoutPlan] Winner amount (95%): ${formatUnits(winnerAmount, 18)} ETH`)
-        }
-    } catch (error) {
-        console.error('[buildPayoutPlan] Error getting Base ETH balance:', error)
+        plan.push({ token: 'NATIVE', amount: winnerAmount })
+        feePlan.push({ token: 'NATIVE', amount: fee })
+        
+        console.log(`[buildPayoutPlan] Total pool balance: ${formatUnits(poolBalance, 18)} ETH`)
+        console.log(`[buildPayoutPlan] Fee (5%): ${formatUnits(fee, 18)} ETH`)
+        console.log(`[buildPayoutPlan] Winner amount (95%): ${formatUnits(winnerAmount, 18)} ETH`)
+    } else {
+        console.log(`[buildPayoutPlan] No funds in pool for game ${game.id}`)
     }
 
     console.log(`[buildPayoutPlan] Final plan:`, plan.map(p => `${formatUnits(p.amount, 18)} ${p.token}`))
@@ -215,15 +201,10 @@ async function executePayout(game: Game, winnerUserId: string): Promise<string> 
     const { plan, feePlan } = await buildPayoutPlan(game)
 
     if (plan.length === 0) {
-        // Check wallet balance one more time for debugging
-        try {
-            const walletBalance = await getBalance(baseClient, { address: bot.appAddress })
-            console.error(`[executePayout] No funds in plan. Wallet balance: ${formatUnits(walletBalance, 18)} ETH`)
-            console.error(`[executePayout] Pool tokens:`, await db.getPoolTokens(game.id))
-            throw new Error(`No funds to payout. Wallet has ${formatUnits(walletBalance, 18)} ETH but plan is empty. Check if tips are going to ${bot.appAddress}`)
-        } catch (error) {
-            throw new Error(`No funds to payout: ${error instanceof Error ? error.message : 'Unknown error'}`)
-        }
+        // Check pool balance for debugging
+        const poolBalance = await db.getPoolBalance(game.id, 'NATIVE')
+        console.error(`[executePayout] No funds in plan. Pool balance for game ${game.id}: ${formatUnits(poolBalance, 18)} ETH`)
+        throw new Error(`No funds to payout. Pool balance for game ${game.id} is ${formatUnits(poolBalance, 18)} ETH.`)
     }
     
     console.log(`[executePayout] Sending payout to winner's smart account: ${winnerSmartAccountAddress}`)
@@ -368,50 +349,37 @@ async function startNewGame(spaceId: string, channelId: string): Promise<Game> {
     return game
 }
 
-// Rollover current game's prize pool to a new game and start immediately
-async function rolloverToNewGame(spaceId: string, channelId: string): Promise<{ newGame: Game; rolled: Array<{ token: string; amount: bigint }> }> {
+// Return funds to depositors and start a new game
+async function returnFundsAndStartNewGame(spaceId: string, channelId: string): Promise<Game> {
     const current = await db.getCurrentGame(spaceId, channelId)
-    // Start fresh game first
-    const newGame = await startNewGame(spaceId, channelId)
-
-    const rolled: Array<{ token: string; amount: bigint }> = []
 
     if (current) {
         // Mark current game as ended (reuse PAYOUT_PENDING to prevent further play)
         await db.setGameState(current.id, 'PAYOUT_PENDING')
 
-        // Move tracked balances to new game (no onchain movement needed)
-        const tokens = await db.getPoolTokens(current.id)
-        for (const token of tokens) {
-            const amount = await db.getPoolBalance(current.id, token)
-            if (amount > 0n) {
-                await db.addToPool(newGame.id, token, amount)
-                rolled.push({ token, amount })
-            }
+        // Return funds to depositors
+        try {
+            await returnFundsToDepositors(current)
+            await bot.sendMessage(
+                channelId,
+                `🔄 **Game #${current.gameNumber} Ended**\n\n` +
+                `All funds have been returned to depositors. A new game will start now.`
+            )
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+            console.error(`[returnFundsAndStartNewGame] Error returning funds:`, error)
+            await bot.sendMessage(
+                channelId,
+                `⚠️ **Game #${current.gameNumber} Ended**\n\n` +
+                `Failed to return funds: ${errorMsg}\n\n` +
+                `Please contact an admin. A new game will start, but previous funds may need manual handling.`
+            )
         }
     }
 
-    // Announce rollover details
-    if (rolled.length > 0) {
-        const lines = rolled.map(r => {
-            const symbol = r.token === 'NATIVE' ? 'ETH' : r.token.slice(0, 6) + '...'
-            return `• ${formatUnits(r.amount, 18)} ${symbol}`
-        }).join('\n')
-
-        await bot.sendMessage(
-            channelId,
-            `↪️ Prize pool rolled over to Game #${newGame.gameNumber}:\n${lines}\n\n` +
-            await formatPool(newGame),
-        )
-    } else {
-        await bot.sendMessage(
-            channelId,
-            `↪️ No funds to roll over. Game #${newGame.gameNumber} has started.\n\n` +
-            await formatPool(newGame),
-        )
-    }
-
-    return { newGame, rolled }
+    // Start fresh game
+    const newGame = await startNewGame(spaceId, channelId)
+    return newGame
 }
 
 // Handle tips
@@ -478,7 +446,7 @@ bot.onTip(async (handler, event) => {
     
     // Store as NATIVE - bot only accepts native ETH
     const depositToken = 'NATIVE'
-    db.addDeposit(game.id, event.senderAddress, depositToken, event.amount)
+    await db.addDeposit(game.id, event.senderAddress, depositToken, event.amount)
     console.log(`[onTip] Base ETH tip received: ${formatUnits(event.amount, 18)} ETH from ${event.senderAddress} for game ${game.id}`)
     console.log(`[onTip] Game #${game.gameNumber} - App contract: ${bot.appAddress}, Receiver: ${event.receiverAddress}`)
     
@@ -693,17 +661,17 @@ bot.onSlashCommand('config', async (handler, event) => {
     const action = event.args[0]?.toLowerCase()
 
     if (action === 'reset' || action === 'rollover') {
-        // End current round (no winner) and roll tracked prize pool to the next round
-        const { newGame } = await rolloverToNewGame(event.spaceId, event.channelId)
+        // End current round (no winner) and return funds to depositors
+        const newGame = await returnFundsAndStartNewGame(event.spaceId, event.channelId)
         await handler.sendMessage(
             event.channelId,
-            `✅ Round ended with no winner. Prize pool rolled into Game #${newGame.gameNumber}.`,
+            `✅ Round ended with no winner. Funds returned to depositors. Game #${newGame.gameNumber} has started.`,
         )
     } else {
         await handler.sendMessage(
             event.channelId,
             '**Admin Commands:**\n' +
-            '• `/config reset` - End current round (no winner) and roll prize into a new round\n' +
+            '• `/config reset` - End current round (no winner) and return funds to depositors\n' +
             '• `/config rollover` - Alias for reset',
         )
     }
@@ -712,17 +680,22 @@ bot.onSlashCommand('config', async (handler, event) => {
 // Load and log all active games on startup
 async function loadActiveGamesOnStartup() {
     try {
+        console.log(`[Startup] Checking database for active games...`)
         const activeGames = await db.getAllActiveGames()
         if (activeGames.length > 0) {
-            console.log(`[Startup] Loaded ${activeGames.length} active game(s) from persistent storage:`)
+            console.log(`[Startup] ✅ Loaded ${activeGames.length} active game(s) from persistent storage:`)
             for (const game of activeGames) {
                 console.log(`[Startup]   - Game #${game.gameNumber} (${game.spaceId}:${game.channelId}) - Target word: ${game.targetWord}`)
+                console.log(`[Startup]   - Game ID: ${game.id}, State: ${game.state}, Created: ${game.createdAt}`)
             }
+            console.log(`[Startup] Active games will be restored when users interact with the bot.`)
         } else {
-            console.log(`[Startup] No active games found in database. Bot is ready for new games.`)
+            console.log(`[Startup] ⚠️ No active games found in database. Bot is ready for new games.`)
+            console.log(`[Startup] This is normal if this is the first run or all previous games were completed.`)
         }
     } catch (error) {
-        console.error(`[Startup] Error loading active games:`, error)
+        console.error(`[Startup] ❌ Error loading active games:`, error)
+        console.error(`[Startup] Stack trace:`, error instanceof Error ? error.stack : 'No stack trace')
     }
 }
 
