@@ -605,14 +605,50 @@ bot.onSlashCommand('guess', async (handler, event) => {
     await processGuess(handler, game, event.userId, event.spaceId, event.channelId, guess, threadId)
 })
 
-// Handle messages in threads (allow guesses in thread replies)
+// Handle messages in threads (allow guesses in thread replies) and mentions
 bot.onMessage(async (handler, event) => {
+    // Debug logging for mentions
+    if (event.isMentioned) {
+        console.log(`[onMessage] Bot was mentioned by ${event.userId} in channel ${event.channelId}`)
+        console.log(`[onMessage] Message: ${event.message}`)
+        console.log(`[onMessage] Mentions array:`, event.mentions)
+    }
+    
+    const game = await getOrCreateGame(event.spaceId, event.channelId)
+    
+    // Handle mentions - respond with game info and help
+    if (event.isMentioned) {
+        const eligibleCount = (await db.getEligiblePlayers(game.id)).length
+        const message =
+            `🎮 **Wordle Game #${game.gameNumber}**\n\n` +
+            `**How to play:**\n` +
+            `1. 💰 **Tip the bot** to join this round (any amount)\n` +
+            `2. Use \`/guess <word>\` to submit a guess\n` +
+            `3. You have unlimited guesses\n` +
+            `4. First correct guess wins the entire prize pool!\n\n` +
+            `**Rules:**\n` +
+            `• Only players who have tipped can play and win\n` +
+            `• ${eligibleCount} player${eligibleCount !== 1 ? 's' : ''} eligible in this round\n\n` +
+            `**Feedback:**\n` +
+            `🟩 Green = correct letter, correct position\n` +
+            `🟨 Yellow = correct letter, wrong position\n` +
+            `⬜ Gray = letter not in word\n\n` +
+            `**Commands:**\n` +
+            `• \`/wordle\` - Show help\n` +
+            `• \`/guess <word>\` - Submit a guess\n` +
+            `• \`/pool\` - Show prize pool\n` +
+            `• \`/leaderboard\` - Show leaderboard\n\n` +
+            await formatPool(game)
+        
+        await handler.sendMessage(event.channelId, message)
+        return
+    }
+    
     // Process guesses in threads - users can continue guessing in the same thread
     if (!event.threadId) {
         return
     }
 
-    const game = await getOrCreateGame(event.spaceId, event.channelId)
     const message = event.message.trim()
     const cleanMessage = message.replace(/\s+/g, '').toLowerCase()
     
